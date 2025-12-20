@@ -126,11 +126,12 @@ def navigate_to_object(controller, agent_id, obj, capture_callback):
     print(f"  📍 목표 위치: ({target_pos['x']:.2f}, {target_pos['z']:.2f}), 객체까지 {target_info['distance_to_obj']:.2f}m")
     
     # 4단계: 목표 위치로 완전히 이동 (반드시 도착할 때까지)
-    print(f"  🚶 목표 위치로 이동 중...")
+    print(f"  🚶 목표 위치로 이동 중... (현재 거리: {calculate_distance(get_metadata()['agent']['position'], target_pos):.2f}m)")
     max_steps = 150
     stuck_count = 0
     last_distance = float('inf')
     avoidance_direction = 'right'
+    consecutive_no_progress = 0
     
     for step in range(max_steps):
         current_pos = get_metadata()['agent']['position']
@@ -138,16 +139,20 @@ def navigate_to_object(controller, agent_id, obj, capture_callback):
         
         dist = calculate_distance(current_pos, target_pos)
         
-        # 목표 위치에 충분히 가까워졌는지 확인 (0.3m 이내)
-        if dist <= 0.3:
+        # 목표 위치에 충분히 가까워졌는지 확인 (0.4m 이내로 완화)
+        if dist <= 0.4:
             print(f"  ✓ 목표 위치 도착! (거리: {dist:.2f}m)")
             break
         
-        # 진행 상황 체크
-        if dist >= last_distance - 0.03:
-            stuck_count += 1
-            if stuck_count >= 5:
-                print(f"  ⚠️ 진행 없음, 우회 시도")
+        # 진행 상황 체크 (더 관대하게 - 0.1m 이상 줄어들면 진행으로 판단)
+        if dist < last_distance - 0.1:
+            consecutive_no_progress = 0
+            if step % 10 == 0:
+                print(f"  📍 진행 중... 남은 거리: {dist:.2f}m")
+        else:
+            consecutive_no_progress += 1
+            if consecutive_no_progress >= 8:  # 8회 연속 진행 없을 때만 우회
+                print(f"  ⚠️ 진행 없음 (연속 {consecutive_no_progress}회), 우회 시도")
                 controller.step(action='MoveBack', moveMagnitude=0.3, **step_kwargs)
                 capture_callback()
                 
@@ -156,10 +161,8 @@ def navigate_to_object(controller, agent_id, obj, capture_callback):
                 capture_callback()
                 
                 avoidance_direction = 'left' if avoidance_direction == 'right' else 'right'
-                stuck_count = 0
+                consecutive_no_progress = 0
                 continue
-        else:
-            stuck_count = 0
         
         last_distance = dist
         
@@ -167,10 +170,11 @@ def navigate_to_object(controller, agent_id, obj, capture_callback):
         target_angle = calculate_angle(current_pos, target_pos)
         angle_diff = normalize_angle(target_angle - current_rot)
         
-        # 방향 조정 (정확하게)
-        if abs(angle_diff) > 10:
+        # 방향 조정 (15도 이상 차이날 때만)
+        if abs(angle_diff) > 15:
             direction = 'RotateRight' if angle_diff > 0 else 'RotateLeft'
-            controller.step(action=direction, degrees=min(30, abs(angle_diff)), **step_kwargs)
+            degrees_to_rotate = min(30, abs(angle_diff))
+            controller.step(action=direction, degrees=degrees_to_rotate, **step_kwargs)
             capture_callback()
             continue  # 회전 후 다음 루프
         
@@ -181,7 +185,7 @@ def navigate_to_object(controller, agent_id, obj, capture_callback):
         
         if not event.metadata['lastActionSuccess']:
             # 충돌 시 스마트 회피
-            print(f"  🚧 충돌 감지, {avoidance_direction} 회피")
+            print(f"  🚧 충돌 감지! {avoidance_direction} 회피")
             
             controller.step(action='MoveBack', moveMagnitude=0.2, **step_kwargs)
             capture_callback()

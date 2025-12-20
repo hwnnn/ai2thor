@@ -223,25 +223,28 @@ class AgentTaskExecutor:
         """토마토를 썰어서 냉장고에 넣기"""
         print(f"\n[Agent{self.agent_id}] 🎯 작업: {source_object} → {target_object}")
         
-        # 1. 소스 객체 찾기
-        print(f"[Agent{self.agent_id}] [1/5] {source_object} 찾기")
-        source_obj = self.find_object(source_object)
-        if not source_obj:
-            print(f"[Agent{self.agent_id}] ❌ {source_object} 없음")
-            return False
-        
-        # 2. 소스 객체로 이동
-        print(f"[Agent{self.agent_id}] [2/5] {source_object}로 이동")
-        found_source = navigate_to_object(self.controller, self.agent_id, source_obj, self.capture_callback)
+        # 1. 소스 객체로 이동
+        print(f"[Agent{self.agent_id}] [1/4] {source_object}로 이동")
+        found_source = navigate_to_object(self.controller, self.agent_id, source_object, self.capture_callback)
         if not found_source:
             print(f"[Agent{self.agent_id}] ❌ {source_object} 도달 실패")
             return False
         
+        # 2. 소스 객체 찾기
+        metadata = self.controller.last_event.events[self.agent_id].metadata
+        visible_sources = [obj for obj in metadata['objects'] 
+                          if obj['objectType'] == source_object and obj['visible']]
+        if not visible_sources:
+            print(f"[Agent{self.agent_id}] ❌ {source_object} 보이지 않음")
+            return False
+        
+        source_obj = visible_sources[0]
+        
         # 3. 자르기
-        print(f"[Agent{self.agent_id}] [3/5] {source_object} 자르기")
+        print(f"[Agent{self.agent_id}] [2/4] {source_object} 자르기")
         event = self.controller.step(
             action='SliceObject',
-            objectId=found_source['objectId'],
+            objectId=source_obj['objectId'],
             agentId=self.agent_id
         )
         self.capture_callback()
@@ -291,23 +294,28 @@ class AgentTaskExecutor:
             print(f"[Agent{self.agent_id}] ❌ 픽업 실패")
             return False
         
-        # 4. 저장소 찾기 및 이동
-        print(f"[Agent{self.agent_id}] [4/5] {target_object}로 이동")
-        storage_obj = self.find_object(target_object)
-        if not storage_obj:
-            print(f"[Agent{self.agent_id}] ❌ {target_object} 없음")
-            return False
-        
-        found_storage = navigate_to_object(self.controller, self.agent_id, storage_obj, self.capture_callback)
+        # 4. 저장소로 이동
+        print(f"[Agent{self.agent_id}] [3/4] {target_object}로 이동")
+        found_storage = navigate_to_object(self.controller, self.agent_id, target_object, self.capture_callback)
         if not found_storage:
             print(f"[Agent{self.agent_id}] ❌ {target_object} 도달 실패")
             return False
         
-        # 5. 열고 넣기
-        print(f"[Agent{self.agent_id}] [5/5] {target_object}에 넣기")
+        # 5. 저장소 객체 찾기
+        metadata = self.controller.last_event.events[self.agent_id].metadata
+        visible_storages = [obj for obj in metadata['objects'] 
+                           if obj['objectType'] == target_object and obj['visible']]
+        if not visible_storages:
+            print(f"[Agent{self.agent_id}] ❌ {target_object} 보이지 않음")
+            return False
+        
+        storage_obj = visible_storages[0]
+        
+        # 6. 열고 넣기
+        print(f"[Agent{self.agent_id}] [4/4] {target_object}에 넣기")
         event = self.controller.step(
             action='OpenObject',
-            objectId=found_storage['objectId'],
+            objectId=storage_obj['objectId'],
             agentId=self.agent_id
         )
         self.capture_callback()
@@ -318,7 +326,7 @@ class AgentTaskExecutor:
         
         event = self.controller.step(
             action='PutObject',
-            objectId=found_storage['objectId'],
+            objectId=storage_obj['objectId'],
             forceAction=True,
             agentId=self.agent_id
         )
@@ -335,24 +343,28 @@ class AgentTaskExecutor:
         """전등 켜기/끄기"""
         print(f"\n[Agent{self.agent_id}] 🎯 작업: 불 {action}")
         
-        # 전등 스위치 찾기
-        light_switch = self.find_object("LightSwitch")
-        if not light_switch:
-            print(f"[Agent{self.agent_id}] ❌ LightSwitch 없음")
-            return False
-        
-        # 스위치로 이동
+        # 1. 스위치로 이동
         print(f"[Agent{self.agent_id}] [1/2] LightSwitch로 이동")
-        found_switch = navigate_to_object(self.controller, self.agent_id, light_switch, self.capture_callback)
+        found_switch = navigate_to_object(self.controller, self.agent_id, "LightSwitch", self.capture_callback)
         if not found_switch:
             print(f"[Agent{self.agent_id}] ❌ LightSwitch 도달 실패")
             return False
         
-        # 토글
+        # 2. 스위치 객체 찾기
+        metadata = self.controller.last_event.events[self.agent_id].metadata
+        visible_switches = [obj for obj in metadata['objects'] 
+                           if obj['objectType'] == "LightSwitch" and obj['visible']]
+        if not visible_switches:
+            print(f"[Agent{self.agent_id}] ❌ LightSwitch 보이지 않음")
+            return False
+        
+        light_switch = visible_switches[0]
+        
+        # 3. 토글
         print(f"[Agent{self.agent_id}] [2/2] 불 {action}")
         event = self.controller.step(
             action='ToggleObjectOn' if action == "켜기" else 'ToggleObjectOff',
-            objectId=found_switch['objectId'],
+            objectId=light_switch['objectId'],
             agentId=self.agent_id
         )
         self.capture_callback()
@@ -435,7 +447,11 @@ def main():
             width=800,
             height=600,
             fieldOfView=90,
-            visibilityDistance=10.0
+            visibilityDistance=10.0,
+            snapToGrid=False,
+            renderDepthImage=False,
+            renderInstanceSegmentation=False,
+            targetFrameRate=15  # FPS 15로 설정
         )
         
         # 비디오 라이터 생성
@@ -458,7 +474,9 @@ def main():
         object_positions = [obj['position'] for obj in all_objects]
         print(f"📦 씬 내 객체 수: {len(object_positions)}개")
         
-        # 에이전트 시작 위치 (agent끼리, 객체들과도 최대한 멀리)
+        # 에이전트 초기 배치 (시뮬레이션 준비 단계)
+        # 객체와의 최소 거리를 4.0m로 늘려서 반드시 이동하도록 함
+        print(f"\n🎬 에이전트 배치 중...\n")
         start_positions = []
         for i in range(num_agents):
             start_pos = get_random_position(
@@ -466,7 +484,7 @@ def main():
                 exclude_positions=start_positions,
                 object_positions=object_positions,
                 min_distance_agents=3.0,
-                min_distance_objects=2.5
+                min_distance_objects=4.0
             )
             start_positions.append(start_pos)
             controller.step(

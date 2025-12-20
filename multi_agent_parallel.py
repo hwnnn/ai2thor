@@ -9,112 +9,12 @@ Multi-Agent Parallel Task Executor
 import os
 import cv2
 import numpy as np
-import math
 from datetime import datetime
 from ai2thor.controller import Controller
 from collections import deque
+from navigation_utils import navigate_to_object, calculate_distance, calculate_angle, normalize_angle
+from navigation_action import navigate_single_action
 
-
-def calculate_distance(pos1, pos2):
-    """두 위치 간 거리 계산"""
-    return math.sqrt((pos1['x'] - pos2['x'])**2 + (pos1['z'] - pos2['z'])**2)
-
-
-def calculate_angle(from_pos, to_pos):
-    """목표 방향의 각도 계산 (degrees)"""
-    dx = to_pos['x'] - from_pos['x']
-    dz = to_pos['z'] - from_pos['z']
-    angle = math.degrees(math.atan2(dx, dz))
-    return angle
-
-
-def normalize_angle(angle):
-    """각도를 -180~180 범위로 정규화"""
-    while angle > 180:
-        angle -= 360
-    while angle < -180:
-        angle += 360
-    return angle
-
-
-def get_interactable_positions(controller, agent_id, obj_id):
-    """객체와 상호작용 가능한 위치들을 가져오기"""
-    event = controller.step(
-        action='GetInteractablePoses',
-        objectId=obj_id,
-        agentId=agent_id
-    )
-    
-    if event.metadata['lastActionSuccess'] and event.metadata['actionReturn']:
-        return event.metadata['actionReturn']
-    return None
-
-
-def navigate_to_obj_and_interact(controller, agent_id, obj, capture_callback, max_attempts=3):
-    """
-    AI2-THOR 내장 네비게이션 활용하여 객체로 이동 및 상호작용
-    - GetInteractablePoses로 접근 가능한 위치 찾기
-    - 해당 위치로 Teleport 또는 단계별 이동
-    - 객체가 visible 상태가 되면 반환
-    """
-    obj_id = obj['objectId']
-    
-    # 1. 상호작용 가능한 위치들 가져오기
-    poses = get_interactable_positions(controller, agent_id, obj_id)
-    
-    if poses:
-        # 현재 위치에서 가장 가까운 pose 선택
-        current_pos = controller.last_event.events[agent_id].metadata['agent']['position']
-        
-        def distance(p1, p2):
-            return ((p1['x'] - p2['x'])**2 + (p1['z'] - p2['z'])**2)**0.5
-        
-        sorted_poses = sorted(poses, key=lambda p: distance(current_pos, p))
-        
-        # 가까운 위치들 순서대로 시도
-        for i, target_pose in enumerate(sorted_poses[:max_attempts]):
-            # target_pose는 dictionary 형태여야 함
-            if isinstance(target_pose, dict):
-                rotation_y = target_pose.get('rotation', {})
-                if isinstance(rotation_y, dict):
-                    rotation_y = rotation_y.get('y', 0)
-                elif isinstance(rotation_y, (int, float)):
-                    rotation_y = rotation_y
-                else:
-                    rotation_y = 0
-                
-                # Teleport로 해당 위치로 이동 (horizon은 0으로 고정하여 정상 시야각 유지)
-                event = controller.step(
-                    action='TeleportFull',
-                    agentId=agent_id,
-                    x=target_pose.get('x', 0),
-                    y=target_pose.get('y', 0.91),
-                    z=target_pose.get('z', 0),
-                    rotation=dict(x=0, y=rotation_y, z=0),
-                    horizon=0,  # 정면을 보도록 고정
-                    standing=True
-                )
-                capture_callback()
-                
-                if event.metadata['lastActionSuccess']:
-                    # 객체가 보이는지 확인
-                    visible_objs = [o for o in event.metadata['objects']
-                                   if o['objectId'] == obj_id and o['visible']]
-                    if visible_objs:
-                        return visible_objs[0]
-    
-    # 2. GetInteractablePoses 실패 시 기존 방식으로 회전하며 찾기
-    for rotation in range(8):
-        event = controller.last_event.events[agent_id]
-        visible_objs = [o for o in event.metadata['objects']
-                       if o['objectId'] == obj_id and o['visible']]
-        if visible_objs:
-            return visible_objs[0]
-        
-        controller.step(action='RotateRight', agentId=agent_id, degrees=45)
-        capture_callback()
-    
-    return None
 
 
 class TaskQueue:
@@ -160,8 +60,11 @@ class MultiAgentTaskExecutor:
         self.agent_id = agent_id
         self.capture_callback = capture_callback
         self.current_task = None
-        self.task_state = 'idle'  # idle, moving, interacting, completed
         self.task_step = 0
+        self.task_data = {}
+        self.nav_state = 'idle'  # idle, navigating, rotating, moving_back, interacting, completed
+        self.rotation_attempts = 0
+        self.max_rotation_attempts = 1  # 한 번만 회전 시도
     
     def get_agent_position(self):
         """에이전트 현재 위치"""
@@ -210,6 +113,556 @@ class MultiAgentTaskExecutor:
         
         return False, 'moving'
     
+    def execute_single_action(self, task):
+        """한 번의 액션만 실행 (병렬 인터리빙용)"""
+        if task['type'] == 'slice_and_store':
+            return self._action_slice_and_store(task)
+        elif task['type'] == 'toggle_light':
+            return self._action_toggle_light(task)
+        elif task['type'] == 'heat_object':
+            return self._action_heat_object(task)
+        elif task['type'] == 'clean_object':
+            return self._action_clean_object(task)
+        return True
+    
+    def _action_slice_and_store(self, task):
+        """slice_and_store를 액션 단위로 실행"""
+        if self.task_step == 0:
+            # 초기화: 객체 찾기
+            target_obj = None
+            for obj in self.controller.last_event.metadata['objects']:
+                if obj['objectType'] == task['source_object'] and not obj['isPickedUp']:
+                    target_obj = obj
+                    break
+            
+            if not target_obj:
+                print(f"[Agent{self.agent_id}] ❌ {task['source_object']}를 찾을 수 없음")
+                return True
+            
+            self.task_data = {
+                'source_obj': target_obj,
+                'nav_state': {},
+                'phase': 'navigate_to_source'
+            }
+            print(f"[Agent{self.agent_id}] 📋 {task['source_object']}를 썰어서 {task['target_object']}에 넣기")
+            self.task_step = 1
+            return False
+        
+        elif self.task_step == 1:
+            # 소스 객체로 네비게이션 (액션 단위)
+            if self.task_data['phase'] == 'navigate_to_source':
+                completed, new_state, found_obj = navigate_single_action(
+                    self.controller,
+                    self.agent_id,
+                    self.task_data['nav_state'],
+                    self.task_data['source_obj'],
+                    self.capture_callback
+                )
+                self.task_data['nav_state'] = new_state
+                
+                if completed:
+                    if found_obj:
+                        print(f"  [Agent{self.agent_id}] ✓ {task['source_object']} 도달!")
+                        self.task_data['source_obj'] = found_obj
+                        self.task_step = 2
+                    else:
+                        print(f"[Agent{self.agent_id}] ❌ {task['source_object']} 네비게이션 실패")
+                        return True
+                return False
+        
+        elif self.task_step == 2:
+            # 자르기
+            event = self.controller.step(
+                action='SliceObject',
+                objectId=self.task_data['source_obj']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ 자르기 성공!")
+                self.task_step = 3
+            else:
+                print(f"[Agent{self.agent_id}] ❌ 자르기 실패")
+                return True
+            return False
+        
+        elif self.task_step == 3:
+            # 슬라이스 조각 찾기 (한 번만 회전)
+            event = self.controller.last_event.events[self.agent_id]
+            visible_slices = [obj for obj in event.metadata['objects']
+                            if 'Sliced' in obj['objectType'] and 
+                            task['source_object'] in obj['objectType'] and
+                            obj['visible']]
+            
+            if visible_slices:
+                self.task_data['sliced'] = visible_slices[0]
+                print(f"  [Agent{self.agent_id}] ✓ 슬라이스 발견!")
+                self.task_step = 4
+            else:
+                # 상하 시야 확인
+                look_step = self.task_data.get('look_step', 0)
+                if look_step == 0:
+                    # 아래 확인
+                    print(f"  [Agent{self.agent_id}] 👇 아래 확인")
+                    self.controller.step(action='LookDown', agentId=self.agent_id)
+                    self.capture_callback()
+                    self.task_data['look_step'] = 1
+                elif look_step == 1:
+                    # 위 확인
+                    print(f"  [Agent{self.agent_id}] 👆 위 확인")
+                    self.controller.step(action='LookUp', agentId=self.agent_id)
+                    self.controller.step(action='LookUp', agentId=self.agent_id)
+                    self.capture_callback()
+                    self.task_data['look_step'] = 2
+                else:
+                    # 시선 정면으로 복구
+                    self.controller.step(action='LookDown', agentId=self.agent_id)
+                    self.capture_callback()
+                    print(f"[Agent{self.agent_id}] ❌ 슬라이스를 찾을 수 없음")
+                    return True
+            return False
+        
+        elif self.task_step == 4:
+            # 픽업
+            event = self.controller.step(
+                action='PickupObject',
+                objectId=self.task_data['sliced']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ 픽업 성공!")
+                self.task_step = 5
+            else:
+                return True
+            return False
+        
+        elif self.task_step == 5:
+            # 타겟 객체 찾기
+            if self.task_data.get('phase') != 'navigate_to_target':
+                target_obj = None
+                for obj in self.controller.last_event.metadata['objects']:
+                    if obj['objectType'] == task['target_object']:
+                        target_obj = obj
+                        break
+                
+                if not target_obj:
+                    print(f"[Agent{self.agent_id}] ❌ {task['target_object']}를 찾을 수 없음")
+                    return True
+                
+                self.task_data['target_obj'] = target_obj
+                self.task_data['nav_state'] = {}
+                self.task_data['phase'] = 'navigate_to_target'
+            
+            # 타겟으로 네비게이션
+            completed, new_state, found_obj = navigate_single_action(
+                self.controller,
+                self.agent_id,
+                self.task_data['nav_state'],
+                self.task_data['target_obj'],
+                self.capture_callback
+            )
+            self.task_data['nav_state'] = new_state
+            
+            if completed:
+                if found_obj:
+                    print(f"  [Agent{self.agent_id}] ✓ {task['target_object']} 도달!")
+                    self.task_data['target_obj'] = found_obj
+                    self.task_step = 6
+                else:
+                    print(f"[Agent{self.agent_id}] ❌ {task['target_object']} 네비게이션 실패")
+                    return True
+            return False
+        
+        elif self.task_step == 6:
+            # 타겟 열기
+            event = self.controller.step(
+                action='OpenObject',
+                objectId=self.task_data['target_obj']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ 열기 성공!")
+                self.task_step = 7
+            else:
+                return True
+            return False
+        
+        elif self.task_step == 7:
+            # 넣기
+            event = self.controller.step(
+                action='PutObject',
+                objectId=self.task_data['target_obj']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ 넣기 성공!")
+                self.task_step = 8
+            else:
+                return True
+            return False
+        
+        elif self.task_step == 8:
+            # 닫기
+            event = self.controller.step(
+                action='CloseObject',
+                objectId=self.task_data['target_obj']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            print(f"[Agent{self.agent_id}] ✅ 작업 완료!")
+            return True
+        
+        return True
+    
+    def _action_toggle_light(self, task):
+        """toggle_light를 액션 단위로 실행"""
+        if self.task_step == 0:
+            # 라이트 스위치 찾기
+            light_switch = None
+            for obj in self.controller.last_event.metadata['objects']:
+                if obj['objectType'] == 'LightSwitch':
+                    light_switch = obj
+                    break
+            
+            if not light_switch:
+                print(f"[Agent{self.agent_id}] ❌ LightSwitch를 찾을 수 없음")
+                return True
+            
+            self.task_data = {
+                'light_switch': light_switch,
+                'nav_state': {}
+            }
+            print(f"[Agent{self.agent_id}] 📋 LightSwitch {task['action']}")
+            self.task_step = 1
+            return False
+        
+        elif self.task_step == 1:
+            # 네비게이션
+            completed, new_state, found_obj = navigate_single_action(
+                self.controller,
+                self.agent_id,
+                self.task_data['nav_state'],
+                self.task_data['light_switch'],
+                self.capture_callback
+            )
+            self.task_data['nav_state'] = new_state
+            
+            if completed:
+                if found_obj:
+                    print(f"  [Agent{self.agent_id}] ✓ LightSwitch 도달!")
+                    self.task_data['light_switch'] = found_obj
+                    self.task_step = 2
+                else:
+                    print(f"[Agent{self.agent_id}] ❌ LightSwitch 네비게이션 실패")
+                    return True
+            return False
+        
+        elif self.task_step == 2:
+            # 토글
+            if task['action'] == '끄기' and self.task_data['light_switch']['isToggled']:
+                action = 'ToggleObjectOff'
+            elif task['action'] == '켜기' and not self.task_data['light_switch']['isToggled']:
+                action = 'ToggleObjectOn'
+            else:
+                print(f"  [Agent{self.agent_id}] ℹ️ 이미 {task['action']} 상태")
+                return True
+            
+            event = self.controller.step(
+                action=action,
+                objectId=self.task_data['light_switch']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ {task['action']} 성공!")
+                print(f"[Agent{self.agent_id}] ✅ 작업 완료!")
+                return True
+            else:
+                return True
+        
+        return True
+    
+    def _action_heat_object(self, task):
+        """heat_object를 액션 단위로 실행"""
+        if self.task_step == 0:
+            # 대상 객체 찾기
+            target_obj = None
+            for obj in self.controller.last_event.metadata['objects']:
+                if obj['objectType'] == task['object']:
+                    target_obj = obj
+                    break
+            
+            if not target_obj:
+                print(f"[Agent{self.agent_id}] ❌ {task['object']}를 찾을 수 없음")
+                return True
+            
+            self.task_data = {
+                'target_obj': target_obj,
+                'nav_state': {},
+                'phase': 'navigate_to_object'
+            }
+            print(f"[Agent{self.agent_id}] 📋 {task['object']}를 전자레인지에 데우기")
+            self.task_step = 1
+            return False
+        
+        elif self.task_step == 1:
+            # 객체로 네비게이션
+            if self.task_data['phase'] == 'navigate_to_object':
+                completed, new_state, found_obj = navigate_single_action(
+                    self.controller,
+                    self.agent_id,
+                    self.task_data['nav_state'],
+                    self.task_data['target_obj'],
+                    self.capture_callback
+                )
+                self.task_data['nav_state'] = new_state
+                
+                if completed:
+                    if found_obj:
+                        print(f"  [Agent{self.agent_id}] ✓ {task['object']} 도달!")
+                        self.task_data['target_obj'] = found_obj
+                        self.task_step = 2
+                    else:
+                        print(f"[Agent{self.agent_id}] ❌ {task['object']} 네비게이션 실패")
+                        return True
+            return False
+        
+        elif self.task_step == 2:
+            # 픽업
+            event = self.controller.step(
+                action='PickupObject',
+                objectId=self.task_data['target_obj']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ 픽업 성공!")
+                self.task_step = 3
+            else:
+                return True
+            return False
+        
+        elif self.task_step == 3:
+            # Microwave 찾기
+            if self.task_data.get('phase') != 'navigate_to_microwave':
+                microwave = None
+                for obj in self.controller.last_event.metadata['objects']:
+                    if obj['objectType'] == 'Microwave':
+                        microwave = obj
+                        break
+                
+                if not microwave:
+                    print(f"[Agent{self.agent_id}] ❌ Microwave를 찾을 수 없음")
+                    return True
+                
+                self.task_data['microwave'] = microwave
+                self.task_data['nav_state'] = {}
+                self.task_data['phase'] = 'navigate_to_microwave'
+            
+            # Microwave로 네비게이션
+            completed, new_state, found_obj = navigate_single_action(
+                self.controller,
+                self.agent_id,
+                self.task_data['nav_state'],
+                self.task_data['microwave'],
+                self.capture_callback
+            )
+            self.task_data['nav_state'] = new_state
+            
+            if completed:
+                if found_obj:
+                    print(f"  [Agent{self.agent_id}] ✓ Microwave 도달!")
+                    self.task_data['microwave'] = found_obj
+                    self.task_step = 4
+                else:
+                    print(f"[Agent{self.agent_id}] ❌ Microwave 네비게이션 실패")
+                    return True
+            return False
+        
+        elif self.task_step == 4:
+            # Microwave 열기
+            event = self.controller.step(
+                action='OpenObject',
+                objectId=self.task_data['microwave']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ Microwave 열기 성공!")
+                self.task_step = 5
+            else:
+                return True
+            return False
+        
+        elif self.task_step == 5:
+            # 넣기
+            event = self.controller.step(
+                action='PutObject',
+                objectId=self.task_data['microwave']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ 넣기 성공!")
+                self.task_step = 6
+            else:
+                return True
+            return False
+        
+        elif self.task_step == 6:
+            # 닫기
+            event = self.controller.step(
+                action='CloseObject',
+                objectId=self.task_data['microwave']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ 닫기 성공!")
+                self.task_step = 7
+            else:
+                return True
+            return False
+        
+        elif self.task_step == 7:
+            # 켜기
+            event = self.controller.step(
+                action='ToggleObjectOn',
+                objectId=self.task_data['microwave']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            print(f"[Agent{self.agent_id}] ✅ 작업 완료!")
+            return True
+        
+        return True
+    
+    def _action_clean_object(self, task):
+        """clean_object를 액션 단위로 실행"""
+        if self.task_step == 0:
+            # 대상 객체 찾기
+            target_obj = None
+            for obj in self.controller.last_event.metadata['objects']:
+                if obj['objectType'] == task['object']:
+                    target_obj = obj
+                    break
+            
+            if not target_obj:
+                print(f"[Agent{self.agent_id}] ❌ {task['object']}를 찾을 수 없음")
+                return True
+            
+            self.task_data = {
+                'target_obj': target_obj,
+                'nav_state': {},
+                'phase': 'navigate_to_object'
+            }
+            print(f"[Agent{self.agent_id}] 📋 {task['object']}를 싱크대에서 씻기")
+            self.task_step = 1
+            return False
+        
+        elif self.task_step == 1:
+            # 객체로 네비게이션
+            if self.task_data['phase'] == 'navigate_to_object':
+                completed, new_state, found_obj = navigate_single_action(
+                    self.controller,
+                    self.agent_id,
+                    self.task_data['nav_state'],
+                    self.task_data['target_obj'],
+                    self.capture_callback
+                )
+                self.task_data['nav_state'] = new_state
+                
+                if completed:
+                    if found_obj:
+                        print(f"  [Agent{self.agent_id}] ✓ {task['object']} 도달!")
+                        self.task_data['target_obj'] = found_obj
+                        self.task_step = 2
+                    else:
+                        print(f"[Agent{self.agent_id}] ❌ {task['object']} 네비게이션 실패")
+                        return True
+            return False
+        
+        elif self.task_step == 2:
+            # 픽업
+            event = self.controller.step(
+                action='PickupObject',
+                objectId=self.task_data['target_obj']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            if event.metadata['lastActionSuccess']:
+                print(f"  [Agent{self.agent_id}] ✓ 픽업 성공!")
+                self.task_step = 3
+            else:
+                return True
+            return False
+        
+        elif self.task_step == 3:
+            # SinkBasin 찾기
+            if self.task_data.get('phase') != 'navigate_to_sink':
+                sink = None
+                for obj in self.controller.last_event.metadata['objects']:
+                    if obj['objectType'] == 'SinkBasin':
+                        sink = obj
+                        break
+                
+                if not sink:
+                    print(f"[Agent{self.agent_id}] ❌ SinkBasin을 찾을 수 없음")
+                    return True
+                
+                self.task_data['sink'] = sink
+                self.task_data['nav_state'] = {}
+                self.task_data['phase'] = 'navigate_to_sink'
+            
+            # SinkBasin으로 네비게이션
+            completed, new_state, found_obj = navigate_single_action(
+                self.controller,
+                self.agent_id,
+                self.task_data['nav_state'],
+                self.task_data['sink'],
+                self.capture_callback
+            )
+            self.task_data['nav_state'] = new_state
+            
+            if completed:
+                if found_obj:
+                    print(f"  [Agent{self.agent_id}] ✓ SinkBasin 도달!")
+                    self.task_data['sink'] = found_obj
+                    self.task_step = 4
+                else:
+                    print(f"[Agent{self.agent_id}] ❌ SinkBasin 네비게이션 실패")
+                    return True
+            return False
+        
+        elif self.task_step == 4:
+            # 싱크대에 넣고 물로 씻기
+            event = self.controller.step(
+                action='CleanObject',
+                objectId=self.task_data['target_obj']['objectId'],
+                agentId=self.agent_id
+            )
+            self.capture_callback()
+            
+            print(f"[Agent{self.agent_id}] ✅ 작업 완료!")
+            return True
+        
+        return True
+    
     def execute_task_step(self, task):
         """작업을 한 스텝 실행 (병렬 실행용)"""
         if task['type'] == 'slice_and_store':
@@ -243,8 +696,8 @@ class MultiAgentTaskExecutor:
             return False
         
         elif self.task_step == 1:
-            # 2. Tomato로 이동 및 찾기 (내장 네비게이션)
-            found_obj = navigate_to_obj_and_interact(
+            # 2. Tomato로 이동 및 찾기 (걸어서 이동)
+            found_obj = navigate_to_object(
                 self.controller, 
                 self.agent_id, 
                 self.task_data['tomato'],
@@ -295,8 +748,19 @@ class MultiAgentTaskExecutor:
                     self.task_step = 5
                     return False
                 
-                if rotation_count < 3:  # 마지막 회전 후에는 캡처하지 않음
-                    self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=90)
+                # 상하 시야 확인
+                if rotation_count == 0:
+                    print(f"  [Agent{self.agent_id}] 👇 아래 확인")
+                    self.controller.step(action='LookDown', agentId=self.agent_id)
+                    self.capture_callback()
+                elif rotation_count == 1:
+                    print(f"  [Agent{self.agent_id}] 👆 위 확인")
+                    self.controller.step(action='LookUp', agentId=self.agent_id)
+                    self.controller.step(action='LookUp', agentId=self.agent_id)
+                    self.capture_callback()
+                elif rotation_count == 2:
+                    # 시선 정면으로 복구
+                    self.controller.step(action='LookDown', agentId=self.agent_id)
                     self.capture_callback()
             
             print(f"[Agent{self.agent_id}] ❌ {sliced_type}를 찾을 수 없음")
@@ -331,7 +795,7 @@ class MultiAgentTaskExecutor:
                 return True
             
             # 직접 상호작용 가능한 위치로 이동
-            found_obj = navigate_to_obj_and_interact(
+            found_obj = navigate_to_object(
                 self.controller,
                 self.agent_id,
                 target,
@@ -396,7 +860,7 @@ class MultiAgentTaskExecutor:
                 return True
             
             # 직접 상호작용 가능한 위치로 이동
-            found_obj = navigate_to_obj_and_interact(
+            found_obj = navigate_to_object(
                 self.controller,
                 self.agent_id,
                 light_switch,
@@ -454,7 +918,7 @@ class MultiAgentTaskExecutor:
                 return True
             
             # 직접 상호작용 가능한 위치로 이동
-            found_obj = navigate_to_obj_and_interact(
+            found_obj = navigate_to_object(
                 self.controller,
                 self.agent_id,
                 obj,
@@ -500,7 +964,7 @@ class MultiAgentTaskExecutor:
                 return True
             
             # 직접 상호작용 가능한 위치로 이동
-            found_obj = navigate_to_obj_and_interact(
+            found_obj = navigate_to_object(
                 self.controller,
                 self.agent_id,
                 microwave,
@@ -594,7 +1058,7 @@ class MultiAgentTaskExecutor:
                 return True
             
             # 직접 상호작용 가능한 위치로 이동
-            found_obj = navigate_to_obj_and_interact(
+            found_obj = navigate_to_object(
                 self.controller,
                 self.agent_id,
                 obj,
@@ -640,7 +1104,7 @@ class MultiAgentTaskExecutor:
                 return True
             
             # 직접 상호작용 가능한 위치로 이동
-            found_obj = navigate_to_obj_and_interact(
+            found_obj = navigate_to_object(
                 self.controller,
                 self.agent_id,
                 sink,
@@ -832,10 +1296,10 @@ def main():
                         executor.task_step = 0
                         executor.task_data = {}
                         
-                        # 다음 작업 할당
-                        next_task = task_queue.get_next_task(agent_id)
-                        if next_task:
-                            executor.current_task = next_task
+                        # 작업 완료 후 다음 작업 할당하지 않음 (가만히 서있기)
+                        # next_task = task_queue.get_next_task(agent_id)
+                        # if next_task:
+                        #     executor.current_task = next_task
         
         # 결과 출력
         print(f"\n{'='*60}")

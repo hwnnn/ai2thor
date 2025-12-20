@@ -192,12 +192,13 @@ def main():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
     # 비디오 설정
-    fps = 6
+    fps = 30
     fourcc = cv2.VideoWriter_fourcc(*'avc1')
     
     frame_count = [0]
     controller = None
     video_writers = {}
+    executors = {}  # executors를 미리 초기화
     
     def capture_frame_wrapper():
         """프레임 캡처 (원본 해상도)"""
@@ -208,11 +209,42 @@ def main():
                 # 원본 해상도 그대로 사용 (resize 제거)
                 agent_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 
-                # 텍스트 오버레이: Agent 번호와 Frame 번호
+                # 현재 작업 상태 가져오기
+                executor = executors.get(i)
+                status_text = "대기 중"
+                if executor and executor.current_task:
+                    task = executor.current_task
+                    if task['type'] == 'slice_and_store':
+                        status_text = f"{task['source_object']} -> {task['target_object']}"
+                    elif task['type'] == 'toggle_light':
+                        status_text = f"불 {task['action']}"
+                    elif task['type'] == 'heat_object':
+                        status_text = f"{task['object']} 데우기"
+                    elif task['type'] == 'clean_object':
+                        status_text = f"{task['object']} 씻기"
+                    
+                    # 세부 단계 추가
+                    step = executor.task_step
+                    if step == 0:
+                        status_text += " (초기화)"
+                    elif step == 1:
+                        phase = executor.task_data.get('phase', '')
+                        if 'navigate' in phase:
+                            status_text += " (이동 중)"
+                        else:
+                            status_text += " (탐색 중)"
+                    elif step == 2:
+                        status_text += " (상호작용)"
+                    elif step >= 3:
+                        status_text += " (처리 중)"
+                
+                # 텍스트 오버레이
                 cv2.putText(agent_bgr, f"Agent {i}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                cv2.putText(agent_bgr, f"Frame {frame_count[0] + 1}", (10, 70), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.putText(agent_bgr, f"Frame {frame_count[0] + 1}", (10, 65), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(agent_bgr, status_text, (10, 100), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 
                 video_writers[f'agent{i}'].write(agent_bgr)
         frame_count[0] += 1
@@ -267,12 +299,11 @@ def main():
         for task in tasks:
             task_queue.add_task(task)
         
-        # 에이전트 실행자 생성
-        executors = {}
+        # 에이전트 실행자 생성 (이미 초기화된 executors 사용)
         for i in range(num_agents):
             executors[i] = MultiAgentTaskExecutor(controller, i, capture_frame_wrapper)
         
-        print(f"\n💡 병렬 작업 실행 시작\n")
+        print(f"\n💡 병렬 작업 실행 시작 (액션 단위 인터리빙)\n")
         
         # 초기 작업 할당
         for agent_id in range(num_agents):
@@ -280,19 +311,19 @@ def main():
             if task:
                 executors[agent_id].current_task = task
         
-        # 병렬 실행 (인터리빙)
-        max_iterations = 1000
+        # 병렬 실행 (액션 단위 인터리빙)
+        max_iterations = 3000
         iteration = 0
         
         while task_queue.has_tasks() and iteration < max_iterations:
             iteration += 1
             
-            # 모든 에이전트가 한 스텝씩 실행
+            # 모든 에이전트가 한 액션씩 실행 (완료된 agent는 건너뜀)
             for agent_id in range(num_agents):
                 executor = executors[agent_id]
                 
                 if executor.current_task:
-                    completed = executor.execute_task_step(executor.current_task)
+                    completed = executor.execute_single_action(executor.current_task)
                     
                     if completed:
                         task_queue.complete_task(agent_id, True)

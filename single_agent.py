@@ -14,88 +14,7 @@ import random
 import math
 from datetime import datetime
 from ai2thor.controller import Controller
-
-
-def calculate_distance(pos1, pos2):
-    """두 위치 간 거리 계산"""
-    return math.sqrt((pos1['x'] - pos2['x'])**2 + (pos1['z'] - pos2['z'])**2)
-
-
-def get_interactable_positions(controller, obj_id):
-    """객체와 상호작용 가능한 위치들을 가져오기"""
-    event = controller.step(
-        action='GetInteractablePoses',
-        objectId=obj_id
-    )
-    
-    if event.metadata['lastActionSuccess'] and event.metadata['actionReturn']:
-        return event.metadata['actionReturn']
-    return None
-
-
-def navigate_to_obj_and_interact(controller, obj, capture_callback, max_attempts=3):
-    """
-    AI2-THOR 내장 네비게이션 활용하여 객체로 이동 및 상호작용
-    - GetInteractablePoses로 접근 가능한 위치 찾기
-    - 해당 위치로 Teleport
-    - 객체가 visible 상태가 되면 반환
-    """
-    obj_id = obj['objectId']
-    
-    # 1. 상호작용 가능한 위치들 가져오기
-    poses = get_interactable_positions(controller, obj_id)
-    
-    if poses:
-        # 현재 위치에서 가장 가까운 pose 선택
-        current_pos = controller.last_event.metadata['agent']['position']
-        
-        def distance(p1, p2):
-            return ((p1['x'] - p2['x'])**2 + (p1['z'] - p2['z'])**2)**0.5
-        
-        sorted_poses = sorted(poses, key=lambda p: distance(current_pos, p))
-        
-        # 가까운 위치들 순서대로 시도
-        for i, target_pose in enumerate(sorted_poses[:max_attempts]):
-            if isinstance(target_pose, dict):
-                rotation_y = target_pose.get('rotation', {})
-                if isinstance(rotation_y, dict):
-                    rotation_y = rotation_y.get('y', 0)
-                elif isinstance(rotation_y, (int, float)):
-                    rotation_y = rotation_y
-                else:
-                    rotation_y = 0
-                
-                # Teleport로 해당 위치로 이동 (horizon은 0으로 고정하여 정상 시야각 유지)
-                event = controller.step(
-                    action='TeleportFull',
-                    x=target_pose.get('x', 0),
-                    y=target_pose.get('y', 0.91),
-                    z=target_pose.get('z', 0),
-                    rotation=dict(x=0, y=rotation_y, z=0),
-                    horizon=0,  # 정면을 보도록 고정
-                    standing=True
-                )
-                capture_callback()
-                
-                if event.metadata['lastActionSuccess']:
-                    # 객체가 보이는지 확인
-                    visible_objs = [o for o in event.metadata['objects']
-                                   if o['objectId'] == obj_id and o['visible']]
-                    if visible_objs:
-                        return visible_objs[0]
-    
-    # 2. GetInteractablePoses 실패 시 기존 방식으로 회전하며 찾기
-    for rotation in range(8):
-        event = controller.last_event
-        visible_objs = [o for o in event.metadata['objects']
-                       if o['objectId'] == obj_id and o['visible']]
-        if visible_objs:
-            return visible_objs[0]
-        
-        controller.step(action='RotateRight', degrees=45)
-        capture_callback()
-    
-    return None
+from navigation_utils import navigate_to_object, calculate_distance
 
 
 def get_random_position(reachable_positions, exclude_positions=None, min_distance_from_exclude=2.0):
@@ -255,80 +174,141 @@ class TaskExecutor:
         self.capture_frame = capture_callback
         
     def move_to_target(self, goal_pos, stop_distance=0.5, max_replans=5):
-        """BFS 경로를 따라 목표 근처까지 이동"""
-        for plan_idx in range(max_replans):
-            current_pos = self.controller.last_event.metadata['agent']['position']
-            path_idx = bfs_path(self.reachable_positions, self.graph, current_pos, goal_pos)
-            
-            if not path_idx:
-                print("  ⚠️ 경로를 찾지 못함, 우회 시도")
-                if not try_move_sideways(self.controller, self.capture_frame):
-                    self.controller.step(action='RotateRight', degrees=45)
-                    self.capture_frame()
-                continue
-
-            path = [self.reachable_positions[i] for i in path_idx]
-            for wp in path:
-                current_pos = self.controller.last_event.metadata['agent']['position']
-                if calculate_distance(current_pos, goal_pos) <= stop_distance:
-                    return True
-
-                dx = wp['x'] - current_pos['x']
-                dz = wp['z'] - current_pos['z']
-                target_angle = math.degrees(math.atan2(dx, dz))
-                current_rot = self.controller.last_event.metadata['agent']['rotation']['y']
-                angle_diff = (target_angle - current_rot + 180) % 360 - 180
-                
-                if abs(angle_diff) > 5:
-                    direction = 'RotateRight' if angle_diff > 0 else 'RotateLeft'
-                    self.controller.step(action=direction, degrees=min(30, abs(angle_diff)))
-                    self.capture_frame()
-
-                step_dist = calculate_distance(self.controller.last_event.metadata['agent']['position'], wp)
-                move_mag = max(0.1, min(0.5, step_dist))
-                evt = self.controller.step(action='MoveAhead', moveMagnitude=move_mag)
-                self.capture_frame()
-
-                if not evt.metadata['lastActionSuccess']:
-                    print("  🚧 이동 실패, 재계획")
-                    if not try_move_sideways(self.controller, self.capture_frame):
-                        self.controller.step(action='RotateRight', degrees=45)
-                        self.capture_frame()
-                    break
-            else:
-                if calculate_distance(self.controller.last_event.metadata['agent']['position'], goal_pos) <= stop_distance:
-                    return True
-        return False
-    
-    def approach_and_face(self, goal_pos, stop_distance=0.5):
-        """타겟을 향해 정면을 맞추고 더 근접"""
-        for _ in range(8):
+        """AI2-THOR 경로 찾기를 사용하여 목표로 이동"""
+        stuck_counter = 0
+        last_position = None
+        max_attempts = 50
+        
+        for attempt in range(max_attempts):
             current_pos = self.controller.last_event.metadata['agent']['position']
             dist = calculate_distance(current_pos, goal_pos)
             
             if dist <= stop_distance:
                 return True
             
+            # stuck 체크
+            if last_position:
+                movement = calculate_distance(current_pos, last_position)
+                if movement < 0.05:
+                    stuck_counter += 1
+                else:
+                    stuck_counter = 0
+            last_position = current_pos
+            
+            # stuck 회피
+            if stuck_counter >= 3:
+                print(f"  🔄 막힘 감지, 회피 중...")
+                self.controller.step(action='MoveBack', moveMagnitude=0.3)
+                self.capture_frame()
+                self.controller.step(action='RotateRight', degrees=60)
+                self.capture_frame()
+                stuck_counter = 0
+                continue
+            
+            # GetShortestPathToPoint 사용
+            path_result = self.controller.step(
+                action='GetShortestPathToPoint',
+                position=goal_pos
+            )
+            
+            if path_result.metadata['lastActionSuccess']:
+                corners = path_result.metadata['actionReturn']['corners']
+                if corners and len(corners) > 1:
+                    next_wp = corners[1]
+                    
+                    # 방향 계산 및 회전
+                    dx = next_wp['x'] - current_pos['x']
+                    dz = next_wp['z'] - current_pos['z']
+                    target_angle = math.degrees(math.atan2(dx, dz))
+                    current_rot = self.controller.last_event.metadata['agent']['rotation']['y']
+                    angle_diff = (target_angle - current_rot + 180) % 360 - 180
+                    
+                    if abs(angle_diff) > 20:
+                        direction = 'RotateRight' if angle_diff > 0 else 'RotateLeft'
+                        self.controller.step(action=direction, degrees=min(45, abs(angle_diff)))
+                        self.capture_frame()
+                        continue
+                    
+                    # 이동
+                    wp_dist = calculate_distance(current_pos, next_wp)
+                    move_mag = min(0.25, wp_dist * 0.8)
+                    evt = self.controller.step(action='MoveAhead', moveMagnitude=move_mag)
+                    self.capture_frame()
+                    
+                    if not evt.metadata['lastActionSuccess']:
+                        stuck_counter += 1
+                    continue
+            
+            # 경로 찾기 실패 시 직접 이동
             dx = goal_pos['x'] - current_pos['x']
             dz = goal_pos['z'] - current_pos['z']
             target_angle = math.degrees(math.atan2(dx, dz))
             current_rot = self.controller.last_event.metadata['agent']['rotation']['y']
             angle_diff = (target_angle - current_rot + 180) % 360 - 180
             
-            if abs(angle_diff) > 3:
+            if abs(angle_diff) > 20:
                 direction = 'RotateRight' if angle_diff > 0 else 'RotateLeft'
-                self.controller.step(action=direction, degrees=min(20, abs(angle_diff)))
+                self.controller.step(action=direction, degrees=min(45, abs(angle_diff)))
                 self.capture_frame()
                 continue
             
-            step_mag = max(0.05, min(0.25, dist - stop_distance / 2))
+            move_mag = min(0.25, dist * 0.8)
+            evt = self.controller.step(action='MoveAhead', moveMagnitude=move_mag)
+            self.capture_frame()
+            
+            if not evt.metadata['lastActionSuccess']:
+                stuck_counter += 1
+        
+        return calculate_distance(self.controller.last_event.metadata['agent']['position'], goal_pos) <= stop_distance
+    
+    def approach_and_face(self, goal_pos, stop_distance=0.5):
+        """타겟을 향해 정면을 맞추고 더 근접"""
+        stuck_counter = 0
+        last_position = None
+        
+        for _ in range(15):
+            current_pos = self.controller.last_event.metadata['agent']['position']
+            dist = calculate_distance(current_pos, goal_pos)
+            
+            if dist <= stop_distance:
+                return True
+            
+            # stuck 체크
+            if last_position:
+                movement = calculate_distance(current_pos, last_position)
+                if movement < 0.05:
+                    stuck_counter += 1
+                    if stuck_counter >= 3:
+                        print("  🔄 막힘 감지, 회피")
+                        self.controller.step(action='MoveBack', moveMagnitude=0.2)
+                        self.capture_frame()
+                        self.controller.step(action='RotateRight', degrees=45)
+                        self.capture_frame()
+                        stuck_counter = 0
+                else:
+                    stuck_counter = 0
+            last_position = current_pos
+            
+            # 방향 계산 및 회전
+            dx = goal_pos['x'] - current_pos['x']
+            dz = goal_pos['z'] - current_pos['z']
+            target_angle = math.degrees(math.atan2(dx, dz))
+            current_rot = self.controller.last_event.metadata['agent']['rotation']['y']
+            angle_diff = (target_angle - current_rot + 180) % 360 - 180
+            
+            if abs(angle_diff) > 5:
+                direction = 'RotateRight' if angle_diff > 0 else 'RotateLeft'
+                self.controller.step(action=direction, degrees=min(30, abs(angle_diff)))
+                self.capture_frame()
+                continue
+            
+            # 이동
+            step_mag = max(0.05, min(0.2, dist - stop_distance / 2))
             evt = self.controller.step(action='MoveAhead', moveMagnitude=step_mag)
             self.capture_frame()
             
             if not evt.metadata['lastActionSuccess']:
-                if not try_move_sideways(self.controller, self.capture_frame):
-                    self.controller.step(action='RotateRight', degrees=30)
-                    self.capture_frame()
+                stuck_counter += 1
         
         return calculate_distance(self.controller.last_event.metadata['agent']['position'], goal_pos) <= stop_distance
     
@@ -476,9 +456,9 @@ class TaskExecutor:
         
         print(f"  위치: ({item['position']['x']:.2f}, {item['position']['y']:.2f}, {item['position']['z']:.2f})")
         
-        # 2단계: 내장 네비게이션으로 이동
+        # 2단계: 걸어서 이동
         print(f"\n[2/5] {item_name}으로 이동")
-        found_item = navigate_to_obj_and_interact(self.controller, item, self.capture_frame)
+        found_item = navigate_to_object(self.controller, None, item, self.capture_frame)
         
         if not found_item:
             print(f"❌ {item_name}와 상호작용 불가")
@@ -544,7 +524,7 @@ class TaskExecutor:
         
         print(f"  위치: ({storage['position']['x']:.2f}, {storage['position']['y']:.2f}, {storage['position']['z']:.2f})")
         
-        found_storage = navigate_to_obj_and_interact(self.controller, storage, self.capture_frame)
+        found_storage = navigate_to_object(self.controller, None, storage, self.capture_frame)
         
         if not found_storage:
             print(f"❌ {storage_name}와 상호작용 불가")

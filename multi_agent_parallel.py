@@ -2,7 +2,7 @@
 """
 Multi-Agent Parallel Task Executor
 - 진정한 병렬 실행 (인터리빙)
-- 동적 에이전트 생성 (최대 4명)
+- 동적 에이전트 생성 (최대 3명)
 - 동적 작업 할당 (작업 큐 시스템)
 """
 
@@ -35,6 +35,86 @@ def normalize_angle(angle):
     while angle < -180:
         angle += 360
     return angle
+
+
+def get_interactable_positions(controller, agent_id, obj_id):
+    """객체와 상호작용 가능한 위치들을 가져오기"""
+    event = controller.step(
+        action='GetInteractablePoses',
+        objectId=obj_id,
+        agentId=agent_id
+    )
+    
+    if event.metadata['lastActionSuccess'] and event.metadata['actionReturn']:
+        return event.metadata['actionReturn']
+    return None
+
+
+def navigate_to_obj_and_interact(controller, agent_id, obj, capture_callback, max_attempts=3):
+    """
+    AI2-THOR 내장 네비게이션 활용하여 객체로 이동 및 상호작용
+    - GetInteractablePoses로 접근 가능한 위치 찾기
+    - 해당 위치로 Teleport 또는 단계별 이동
+    - 객체가 visible 상태가 되면 반환
+    """
+    obj_id = obj['objectId']
+    
+    # 1. 상호작용 가능한 위치들 가져오기
+    poses = get_interactable_positions(controller, agent_id, obj_id)
+    
+    if poses:
+        # 현재 위치에서 가장 가까운 pose 선택
+        current_pos = controller.last_event.events[agent_id].metadata['agent']['position']
+        
+        def distance(p1, p2):
+            return ((p1['x'] - p2['x'])**2 + (p1['z'] - p2['z'])**2)**0.5
+        
+        sorted_poses = sorted(poses, key=lambda p: distance(current_pos, p))
+        
+        # 가까운 위치들 순서대로 시도
+        for i, target_pose in enumerate(sorted_poses[:max_attempts]):
+            # target_pose는 dictionary 형태여야 함
+            if isinstance(target_pose, dict):
+                rotation_y = target_pose.get('rotation', {})
+                if isinstance(rotation_y, dict):
+                    rotation_y = rotation_y.get('y', 0)
+                elif isinstance(rotation_y, (int, float)):
+                    rotation_y = rotation_y
+                else:
+                    rotation_y = 0
+                
+                # Teleport로 해당 위치로 이동 (horizon은 0으로 고정하여 정상 시야각 유지)
+                event = controller.step(
+                    action='TeleportFull',
+                    agentId=agent_id,
+                    x=target_pose.get('x', 0),
+                    y=target_pose.get('y', 0.91),
+                    z=target_pose.get('z', 0),
+                    rotation=dict(x=0, y=rotation_y, z=0),
+                    horizon=0,  # 정면을 보도록 고정
+                    standing=True
+                )
+                capture_callback()
+                
+                if event.metadata['lastActionSuccess']:
+                    # 객체가 보이는지 확인
+                    visible_objs = [o for o in event.metadata['objects']
+                                   if o['objectId'] == obj_id and o['visible']]
+                    if visible_objs:
+                        return visible_objs[0]
+    
+    # 2. GetInteractablePoses 실패 시 기존 방식으로 회전하며 찾기
+    for rotation in range(8):
+        event = controller.last_event.events[agent_id]
+        visible_objs = [o for o in event.metadata['objects']
+                       if o['objectId'] == obj_id and o['visible']]
+        if visible_objs:
+            return visible_objs[0]
+        
+        controller.step(action='RotateRight', agentId=agent_id, degrees=45)
+        capture_callback()
+    
+    return None
 
 
 class TaskQueue:
@@ -163,27 +243,24 @@ class MultiAgentTaskExecutor:
             return False
         
         elif self.task_step == 1:
-            # 2. Tomato로 이동
-            reached, status = self.step_towards_target(self.task_data['tomato']['position'], min_distance=0.8)
-            if reached:
+            # 2. Tomato로 이동 및 찾기 (내장 네비게이션)
+            found_obj = navigate_to_obj_and_interact(
+                self.controller, 
+                self.agent_id, 
+                self.task_data['tomato'],
+                self.capture_callback
+            )
+            
+            if found_obj:
+                self.task_data['tomato'] = found_obj
+                print(f"  [Agent{self.agent_id}] ✓ {task['source_object']} 발견!")
                 self.task_step = 2
+            else:
+                print(f"[Agent{self.agent_id}] ❌ {task['source_object']}를 찾을 수 없음")
+                return True
             return False
         
         elif self.task_step == 2:
-            # 3. Tomato 보기
-            event = self.controller.last_event.events[self.agent_id]
-            visible_objects = [obj for obj in event.metadata['objects'] 
-                             if obj['visible'] and obj['objectType'] == task['source_object']]
-            
-            if visible_objects:
-                self.task_data['tomato'] = visible_objects[0]
-                self.task_step = 3
-            else:
-                self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=45)
-                self.capture_callback()
-            return False
-        
-        elif self.task_step == 3:
             # 4. Slice
             event = self.controller.step(
                 action='SliceObject',
@@ -201,18 +278,29 @@ class MultiAgentTaskExecutor:
             return False
         
         elif self.task_step == 4:
-            # 5. 슬라이스 조각 찾기
-            event = self.controller.last_event.events[self.agent_id]
-            visible_slices = [obj for obj in event.metadata['objects'] 
-                            if obj['visible'] and 'Sliced' in obj['objectType'] and task['source_object'] in obj['objectType']]
+            # 5. 슬라이스 조각 바로 픽업 시도 (자른 후 바로 옆에 있음)
+            sliced_type = task['source_object'] + 'Sliced'
             
-            if visible_slices:
-                self.task_data['sliced'] = visible_slices[0]
-                self.task_step = 5
-            else:
-                self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=45)
-                self.capture_callback()
-            return False
+            # 주변을 빠르게 스캔 (모든 회전마다 캡처)
+            for rotation_count in range(4):  # 90도씩 4번 회전
+                event = self.controller.last_event.events[self.agent_id]
+                visible_slices = [obj for obj in event.metadata['objects']
+                                if 'Sliced' in obj['objectType'] and 
+                                task['source_object'] in obj['objectType'] and
+                                obj['visible']]
+                
+                if visible_slices:
+                    self.task_data['sliced'] = visible_slices[0]
+                    print(f"  [Agent{self.agent_id}] ✓ {sliced_type} 발견!")
+                    self.task_step = 5
+                    return False
+                
+                if rotation_count < 3:  # 마지막 회전 후에는 캡처하지 않음
+                    self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=90)
+                    self.capture_callback()
+            
+            print(f"[Agent{self.agent_id}] ❌ {sliced_type}를 찾을 수 없음")
+            return True
         
         elif self.task_step == 5:
             # 6. 픽업
@@ -231,7 +319,7 @@ class MultiAgentTaskExecutor:
             return False
         
         elif self.task_step == 6:
-            # 7. 타겟 찾기
+            # 7. 타겟 찾기 및 이동 (내장 네비게이션)
             target = None
             for obj in self.controller.last_event.metadata['objects']:
                 if obj['objectType'] == task['target_object']:
@@ -239,35 +327,28 @@ class MultiAgentTaskExecutor:
                     break
             
             if not target:
+                print(f"[Agent{self.agent_id}] ❌ {task['target_object']}를 찾을 수 없음")
                 return True
             
-            self.task_data['target'] = target
-            self.task_step = 7
+            # 직접 상호작용 가능한 위치로 이동
+            found_obj = navigate_to_obj_and_interact(
+                self.controller,
+                self.agent_id,
+                target,
+                self.capture_callback
+            )
+            
+            if found_obj:
+                self.task_data['target'] = found_obj
+                print(f"  [Agent{self.agent_id}] ✓ {task['target_object']} 발견!")
+                self.task_step = 7
+            else:
+                print(f"[Agent{self.agent_id}] ❌ {task['target_object']}와 상호작용 불가")
+                return True
             return False
         
         elif self.task_step == 7:
-            # 8. 타겟으로 이동
-            reached, status = self.step_towards_target(self.task_data['target']['position'], min_distance=2.0)
-            if reached:
-                self.task_step = 8
-            return False
-        
-        elif self.task_step == 8:
-            # 9. 타겟 보기
-            event = self.controller.last_event.events[self.agent_id]
-            visible_targets = [obj for obj in event.metadata['objects'] 
-                             if obj['visible'] and obj['objectType'] == task['target_object']]
-            
-            if visible_targets:
-                self.task_data['target'] = visible_targets[0]
-                self.task_step = 9
-            else:
-                self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=45)
-                self.capture_callback()
-            return False
-        
-        elif self.task_step == 9:
-            # 10. 타겟 열기
+            # 8. 타겟 열기
             event = self.controller.step(
                 action='OpenObject',
                 objectId=self.task_data['target']['objectId'],
@@ -277,13 +358,13 @@ class MultiAgentTaskExecutor:
             
             if event.metadata['lastActionSuccess']:
                 print(f"  [Agent{self.agent_id}] ✓ 열기 성공!")
-                self.task_step = 10
+                self.task_step = 8
             else:
                 return True
             return False
         
-        elif self.task_step == 10:
-            # 11. 넣기
+        elif self.task_step == 8:
+            # 9. 넣기
             event = self.controller.step(
                 action='PutObject',
                 objectId=self.task_data['target']['objectId'],
@@ -303,7 +384,7 @@ class MultiAgentTaskExecutor:
     def _step_toggle_light(self, task):
         """불 끄기/켜기 (스텝별)"""
         if self.task_step == 0:
-            # LightSwitch 찾기
+            # LightSwitch 찾기 및 이동 (내장 네비게이션)
             light_switch = None
             for obj in self.controller.last_event.metadata['objects']:
                 if obj['objectType'] == 'LightSwitch':
@@ -314,33 +395,25 @@ class MultiAgentTaskExecutor:
                 print(f"[Agent{self.agent_id}] ❌ LightSwitch를 찾을 수 없음")
                 return True
             
-            self.task_data = {'light_switch': light_switch}
-            print(f"[Agent{self.agent_id}] 📋 LightSwitch {task['action']}")
-            self.task_step = 1
+            # 직접 상호작용 가능한 위치로 이동
+            found_obj = navigate_to_obj_and_interact(
+                self.controller,
+                self.agent_id,
+                light_switch,
+                self.capture_callback
+            )
+            
+            if found_obj:
+                self.task_data = {'light_switch': found_obj}
+                print(f"[Agent{self.agent_id}] 📋 LightSwitch {task['action']}")
+                print(f"  [Agent{self.agent_id}] ✓ LightSwitch 발견!")
+                self.task_step = 1
+            else:
+                print(f"[Agent{self.agent_id}] ❌ LightSwitch와 상호작용 불가")
+                return True
             return False
         
         elif self.task_step == 1:
-            # 이동
-            reached, status = self.step_towards_target(self.task_data['light_switch']['position'], min_distance=1.0)
-            if reached:
-                self.task_step = 2
-            return False
-        
-        elif self.task_step == 2:
-            # 보기
-            event = self.controller.last_event.events[self.agent_id]
-            visible_switches = [obj for obj in event.metadata['objects'] 
-                              if obj['visible'] and obj['objectType'] == 'LightSwitch']
-            
-            if visible_switches:
-                self.task_data['light_switch'] = visible_switches[0]
-                self.task_step = 3
-            else:
-                self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=45)
-                self.capture_callback()
-            return False
-        
-        elif self.task_step == 3:
             # 토글
             if task['action'] == '끄기' and self.task_data['light_switch']['isToggled']:
                 action = 'ToggleObjectOff'
@@ -369,7 +442,7 @@ class MultiAgentTaskExecutor:
     def _step_heat_object(self, task):
         """물건 데우기 (스텝별)"""
         if self.task_step == 0:
-            # 오브젝트 찾기
+            # 오브젝트 찾기 및 이동 (내장 네비게이션)
             obj = None
             for o in self.controller.last_event.metadata['objects']:
                 if o['objectType'] == task['object'] and not o['isPickedUp']:
@@ -380,33 +453,25 @@ class MultiAgentTaskExecutor:
                 print(f"[Agent{self.agent_id}] ❌ {task['object']}를 찾을 수 없음")
                 return True
             
-            self.task_data = {'object': obj, 'microwave': None}
-            print(f"[Agent{self.agent_id}] 📋 {task['object']}를 데우기")
-            self.task_step = 1
+            # 직접 상호작용 가능한 위치로 이동
+            found_obj = navigate_to_obj_and_interact(
+                self.controller,
+                self.agent_id,
+                obj,
+                self.capture_callback
+            )
+            
+            if found_obj:
+                self.task_data = {'object': found_obj, 'microwave': None}
+                print(f"[Agent{self.agent_id}] 📋 {task['object']}를 데우기")
+                print(f"  [Agent{self.agent_id}] ✓ {task['object']} 발견!")
+                self.task_step = 1
+            else:
+                print(f"[Agent{self.agent_id}] ❌ {task['object']}와 상호작용 불가")
+                return True
             return False
         
         elif self.task_step == 1:
-            # 오브젝트로 이동
-            reached, status = self.step_towards_target(self.task_data['object']['position'], min_distance=1.0)
-            if reached:
-                self.task_step = 2
-            return False
-        
-        elif self.task_step == 2:
-            # 보기
-            event = self.controller.last_event.events[self.agent_id]
-            visible_objs = [obj for obj in event.metadata['objects'] 
-                          if obj['visible'] and obj['objectType'] == task['object']]
-            
-            if visible_objs:
-                self.task_data['object'] = visible_objs[0]
-                self.task_step = 3
-            else:
-                self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=45)
-                self.capture_callback()
-            return False
-        
-        elif self.task_step == 3:
             # 픽업
             event = self.controller.step(
                 action='PickupObject',
@@ -417,13 +482,13 @@ class MultiAgentTaskExecutor:
             
             if event.metadata['lastActionSuccess']:
                 print(f"  [Agent{self.agent_id}] ✓ 픽업 성공!")
-                self.task_step = 4
+                self.task_step = 2
             else:
                 return True
             return False
         
-        elif self.task_step == 4:
-            # 전자레인지 찾기
+        elif self.task_step == 2:
+            # 전자레인지 찾기 및 이동 (내장 네비게이션)
             microwave = None
             for obj in self.controller.last_event.metadata['objects']:
                 if obj['objectType'] == 'Microwave':
@@ -431,34 +496,27 @@ class MultiAgentTaskExecutor:
                     break
             
             if not microwave:
+                print(f"[Agent{self.agent_id}] ❌ Microwave를 찾을 수 없음")
                 return True
             
-            self.task_data['microwave'] = microwave
-            self.task_step = 5
-            return False
-        
-        elif self.task_step == 5:
-            # 전자레인지로 이동
-            reached, status = self.step_towards_target(self.task_data['microwave']['position'], min_distance=1.5)
-            if reached:
-                self.task_step = 6
-            return False
-        
-        elif self.task_step == 6:
-            # 전자레인지 보기
-            event = self.controller.last_event.events[self.agent_id]
-            visible_microwaves = [obj for obj in event.metadata['objects'] 
-                                if obj['visible'] and obj['objectType'] == 'Microwave']
+            # 직접 상호작용 가능한 위치로 이동
+            found_obj = navigate_to_obj_and_interact(
+                self.controller,
+                self.agent_id,
+                microwave,
+                self.capture_callback
+            )
             
-            if visible_microwaves:
-                self.task_data['microwave'] = visible_microwaves[0]
-                self.task_step = 7
+            if found_obj:
+                self.task_data['microwave'] = found_obj
+                print(f"  [Agent{self.agent_id}] ✓ Microwave 발견!")
+                self.task_step = 3
             else:
-                self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=45)
-                self.capture_callback()
+                print(f"[Agent{self.agent_id}] ❌ Microwave와 상호작용 불가")
+                return True
             return False
         
-        elif self.task_step == 7:
+        elif self.task_step == 3:
             # 전자레인지 열기
             event = self.controller.step(
                 action='OpenObject',
@@ -468,12 +526,12 @@ class MultiAgentTaskExecutor:
             self.capture_callback()
             
             if event.metadata['lastActionSuccess']:
-                self.task_step = 8
+                self.task_step = 4
             else:
                 return True
             return False
         
-        elif self.task_step == 8:
+        elif self.task_step == 4:
             # 전자레인지에 넣기
             event = self.controller.step(
                 action='PutObject',
@@ -483,12 +541,12 @@ class MultiAgentTaskExecutor:
             self.capture_callback()
             
             if event.metadata['lastActionSuccess']:
-                self.task_step = 9
+                self.task_step = 5
             else:
                 return True
             return False
         
-        elif self.task_step == 9:
+        elif self.task_step == 5:
             # 전자레인지 닫기
             event = self.controller.step(
                 action='CloseObject',
@@ -498,12 +556,12 @@ class MultiAgentTaskExecutor:
             self.capture_callback()
             
             if event.metadata['lastActionSuccess']:
-                self.task_step = 10
+                self.task_step = 6
             else:
                 return True
             return False
         
-        elif self.task_step == 10:
+        elif self.task_step == 6:
             # 전자레인지 켜기
             event = self.controller.step(
                 action='ToggleObjectOn',
@@ -524,7 +582,7 @@ class MultiAgentTaskExecutor:
     def _step_clean_object(self, task):
         """물건 씻기 (스텝별)"""
         if self.task_step == 0:
-            # 오브젝트 찾기
+            # 오브젝트 찾기 및 이동 (내장 네비게이션)
             obj = None
             for o in self.controller.last_event.metadata['objects']:
                 if o['objectType'] == task['object'] and not o['isPickedUp']:
@@ -535,33 +593,25 @@ class MultiAgentTaskExecutor:
                 print(f"[Agent{self.agent_id}] ❌ {task['object']}를 찾을 수 없음")
                 return True
             
-            self.task_data = {'object': obj, 'sink': None}
-            print(f"[Agent{self.agent_id}] 📋 {task['object']}를 씻기")
-            self.task_step = 1
+            # 직접 상호작용 가능한 위치로 이동
+            found_obj = navigate_to_obj_and_interact(
+                self.controller,
+                self.agent_id,
+                obj,
+                self.capture_callback
+            )
+            
+            if found_obj:
+                self.task_data = {'object': found_obj, 'sink': None}
+                print(f"[Agent{self.agent_id}] 📋 {task['object']}를 씻기")
+                print(f"  [Agent{self.agent_id}] ✓ {task['object']} 발견!")
+                self.task_step = 1
+            else:
+                print(f"[Agent{self.agent_id}] ❌ {task['object']}와 상호작용 불가")
+                return True
             return False
         
         elif self.task_step == 1:
-            # 오브젝트로 이동
-            reached, status = self.step_towards_target(self.task_data['object']['position'], min_distance=1.0)
-            if reached:
-                self.task_step = 2
-            return False
-        
-        elif self.task_step == 2:
-            # 보기
-            event = self.controller.last_event.events[self.agent_id]
-            visible_objs = [obj for obj in event.metadata['objects'] 
-                          if obj['visible'] and obj['objectType'] == task['object']]
-            
-            if visible_objs:
-                self.task_data['object'] = visible_objs[0]
-                self.task_step = 3
-            else:
-                self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=45)
-                self.capture_callback()
-            return False
-        
-        elif self.task_step == 3:
             # 픽업
             event = self.controller.step(
                 action='PickupObject',
@@ -572,13 +622,13 @@ class MultiAgentTaskExecutor:
             
             if event.metadata['lastActionSuccess']:
                 print(f"  [Agent{self.agent_id}] ✓ 픽업 성공!")
-                self.task_step = 4
+                self.task_step = 2
             else:
                 return True
             return False
         
-        elif self.task_step == 4:
-            # 싱크대 찾기
+        elif self.task_step == 2:
+            # 싱크대 찾기 및 이동 (내장 네비게이션)
             sink = None
             for obj in self.controller.last_event.metadata['objects']:
                 if obj['objectType'] == 'SinkBasin':
@@ -586,34 +636,27 @@ class MultiAgentTaskExecutor:
                     break
             
             if not sink:
+                print(f"[Agent{self.agent_id}] ❌ SinkBasin을 찾을 수 없음")
                 return True
             
-            self.task_data['sink'] = sink
-            self.task_step = 5
-            return False
-        
-        elif self.task_step == 5:
-            # 싱크대로 이동
-            reached, status = self.step_towards_target(self.task_data['sink']['position'], min_distance=1.2)
-            if reached:
-                self.task_step = 6
-            return False
-        
-        elif self.task_step == 6:
-            # 싱크대 보기
-            event = self.controller.last_event.events[self.agent_id]
-            visible_sinks = [obj for obj in event.metadata['objects'] 
-                           if obj['visible'] and obj['objectType'] == 'SinkBasin']
+            # 직접 상호작용 가능한 위치로 이동
+            found_obj = navigate_to_obj_and_interact(
+                self.controller,
+                self.agent_id,
+                sink,
+                self.capture_callback
+            )
             
-            if visible_sinks:
-                self.task_data['sink'] = visible_sinks[0]
-                self.task_step = 7
+            if found_obj:
+                self.task_data['sink'] = found_obj
+                print(f"  [Agent{self.agent_id}] ✓ SinkBasin 발견!")
+                self.task_step = 3
             else:
-                self.controller.step(action='RotateRight', agentId=self.agent_id, degrees=45)
-                self.capture_callback()
+                print(f"[Agent{self.agent_id}] ❌ SinkBasin과 상호작용 불가")
+                return True
             return False
         
-        elif self.task_step == 7:
+        elif self.task_step == 3:
             # 씻기
             event = self.controller.step(
                 action='CleanObject',
@@ -649,7 +692,7 @@ def main():
     ]
     
     # 필요한 에이전트 수 계산 (최소)
-    num_agents = min(len(tasks), 4)  # 최대 4명
+    num_agents = min(len(tasks), 3)  # 최대 3명
     
     print(f"\n🤖 에이전트 수: {num_agents}명")
     print(f"📋 작업 수: {len(tasks)}개")
@@ -663,31 +706,31 @@ def main():
     fps = 6
     fourcc = cv2.VideoWriter_fourcc(*'avc1')
     
-    # 비디오 라이터 생성
-    video_writers = {}
-    for i in range(num_agents):
-        video_writers[f'agent{i}'] = cv2.VideoWriter(
-            os.path.join(output_dir, f'parallel_agent{i}_{timestamp}.mp4'),
-            fourcc, fps, (800, 600)
-        )
-    
     frame_count = 0
     controller = None
+    video_writers = {}
     
     def capture_frame():
-        """모든 프레임 캡처"""
+        """모든 프레임 캡처 (원본 해상도)"""
         nonlocal frame_count
         
         event = controller.last_event
         for i in range(num_agents):
             if event.events[i].frame is not None and event.events[i].frame.size > 0:
                 frame = event.events[i].frame
-                if frame.shape[:2] != (600, 800):
-                    frame = cv2.resize(frame, (800, 600))
+                # 원본 해상도 그대로 사용 (resize 제거)
                 agent_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                
+                # 텍스트 오버레이: Agent 번호와 Frame 번호
+                cv2.putText(agent_bgr, f"Agent {i}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.putText(agent_bgr, f"Frame {frame_count + 1}", (10, 70), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                
                 video_writers[f'agent{i}'].write(agent_bgr)
         
         frame_count += 1
+        print(f"[FRAME {frame_count}]", flush=True)  # 디버그 로그
     
     try:
         # Controller 초기화
@@ -700,6 +743,15 @@ def main():
             fieldOfView=90,
             visibilityDistance=10.0
         )
+        
+        # Controller 초기화 후 비디오 라이터 생성 (원본 해상도 사용)
+        for i in range(num_agents):
+            video_writers[f'agent{i}'] = cv2.VideoWriter(
+                os.path.join(output_dir, f'parallel_agent{i}_{timestamp}.mp4'),
+                fourcc, fps, (controller.last_event.events[i].frame.shape[1], 
+                             controller.last_event.events[i].frame.shape[0])
+            )
+        
         print("✓ 초기화 완료")
         
         # 에이전트 시작 위치 설정
@@ -707,7 +759,6 @@ def main():
             {'x': 0.0, 'y': 0.91, 'z': 0.0},
             {'x': 2.0, 'y': 0.91, 'z': 0.0},
             {'x': -2.0, 'y': 0.91, 'z': 0.0},
-            {'x': 0.0, 'y': 0.91, 'z': 2.0},
         ]
         
         for i in range(num_agents):
@@ -720,6 +771,7 @@ def main():
                 horizon=0,
                 standing=True
             )
+            capture_frame()  # 초기 위치 프레임 캡처
             print(f"📍 Agent{i} 시작: ({start_pos['x']:.2f}, {start_pos['z']:.2f})")
         
         # 첫 프레임 캡처
@@ -804,10 +856,8 @@ def main():
             print(f"  Agent {result['agent_id']}: {task_desc} - {status}")
         print(f"{'='*60}")
         
-        # 마무리 프레임
-        print(f"\n📹 마무리 프레임...")
-        for _ in range(10):
-            capture_frame()
+        # 마무리
+        print(f"\n📹 마무리 중...")
         
         print(f"\n✓ 녹화 완료 (총 {frame_count} 프레임)")
         print(f"📁 저장:")

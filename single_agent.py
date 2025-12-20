@@ -21,6 +21,83 @@ def calculate_distance(pos1, pos2):
     return math.sqrt((pos1['x'] - pos2['x'])**2 + (pos1['z'] - pos2['z'])**2)
 
 
+def get_interactable_positions(controller, obj_id):
+    """객체와 상호작용 가능한 위치들을 가져오기"""
+    event = controller.step(
+        action='GetInteractablePoses',
+        objectId=obj_id
+    )
+    
+    if event.metadata['lastActionSuccess'] and event.metadata['actionReturn']:
+        return event.metadata['actionReturn']
+    return None
+
+
+def navigate_to_obj_and_interact(controller, obj, capture_callback, max_attempts=3):
+    """
+    AI2-THOR 내장 네비게이션 활용하여 객체로 이동 및 상호작용
+    - GetInteractablePoses로 접근 가능한 위치 찾기
+    - 해당 위치로 Teleport
+    - 객체가 visible 상태가 되면 반환
+    """
+    obj_id = obj['objectId']
+    
+    # 1. 상호작용 가능한 위치들 가져오기
+    poses = get_interactable_positions(controller, obj_id)
+    
+    if poses:
+        # 현재 위치에서 가장 가까운 pose 선택
+        current_pos = controller.last_event.metadata['agent']['position']
+        
+        def distance(p1, p2):
+            return ((p1['x'] - p2['x'])**2 + (p1['z'] - p2['z'])**2)**0.5
+        
+        sorted_poses = sorted(poses, key=lambda p: distance(current_pos, p))
+        
+        # 가까운 위치들 순서대로 시도
+        for i, target_pose in enumerate(sorted_poses[:max_attempts]):
+            if isinstance(target_pose, dict):
+                rotation_y = target_pose.get('rotation', {})
+                if isinstance(rotation_y, dict):
+                    rotation_y = rotation_y.get('y', 0)
+                elif isinstance(rotation_y, (int, float)):
+                    rotation_y = rotation_y
+                else:
+                    rotation_y = 0
+                
+                # Teleport로 해당 위치로 이동 (horizon은 0으로 고정하여 정상 시야각 유지)
+                event = controller.step(
+                    action='TeleportFull',
+                    x=target_pose.get('x', 0),
+                    y=target_pose.get('y', 0.91),
+                    z=target_pose.get('z', 0),
+                    rotation=dict(x=0, y=rotation_y, z=0),
+                    horizon=0,  # 정면을 보도록 고정
+                    standing=True
+                )
+                capture_callback()
+                
+                if event.metadata['lastActionSuccess']:
+                    # 객체가 보이는지 확인
+                    visible_objs = [o for o in event.metadata['objects']
+                                   if o['objectId'] == obj_id and o['visible']]
+                    if visible_objs:
+                        return visible_objs[0]
+    
+    # 2. GetInteractablePoses 실패 시 기존 방식으로 회전하며 찾기
+    for rotation in range(8):
+        event = controller.last_event
+        visible_objs = [o for o in event.metadata['objects']
+                       if o['objectId'] == obj_id and o['visible']]
+        if visible_objs:
+            return visible_objs[0]
+        
+        controller.step(action='RotateRight', degrees=45)
+        capture_callback()
+    
+    return None
+
+
 def get_random_position(reachable_positions, exclude_positions=None, min_distance_from_exclude=2.0):
     """이동 가능한 위치 중 랜덤 선택"""
     valid_positions = []
@@ -79,6 +156,66 @@ def build_graph(nodes, grid=0.25, slack=1e-3):
             if dist <= grid + slack:
                 adj[i].append(j)
     return adj
+
+
+def smart_object_search(controller, object_type, capture_callback):
+    """스마트 객체 탐색: 3단계 전략"""
+    # 1단계: 빠른 스캔 (3번 회전, 120도씩)
+    for i in range(3):
+        if i > 0:
+            controller.step(action='RotateRight', degrees=120)
+            capture_callback()
+        
+        event = controller.last_event
+        visible_objs = [obj for obj in event.metadata['objects']
+                       if obj['visible'] and obj['objectType'] == object_type]
+        if visible_objs:
+            return visible_objs[0]
+    
+    # 2단계: Horizon 조정 (-30°, 30°, 60°)
+    for horizon in [-30, 30, 60]:
+        if horizon < 0:
+            controller.step(action='LookUp', degrees=abs(horizon))
+        else:
+            controller.step(action='LookDown', degrees=horizon)
+        capture_callback()
+        
+        for rotation_count in range(3):
+            if rotation_count > 0:
+                controller.step(action='RotateRight', degrees=120)
+                capture_callback()
+            
+            event = controller.last_event
+            visible_objs = [obj for obj in event.metadata['objects']
+                           if obj['visible'] and obj['objectType'] == object_type]
+            if visible_objs:
+                # Horizon 복구
+                if horizon < 0:
+                    controller.step(action='LookDown', degrees=abs(horizon))
+                else:
+                    controller.step(action='LookUp', degrees=horizon)
+                capture_callback()
+                return visible_objs[0]
+        
+        # Horizon 복구
+        if horizon < 0:
+            controller.step(action='LookDown', degrees=abs(horizon))
+        else:
+            controller.step(action='LookUp', degrees=horizon)
+        capture_callback()
+    
+    # 3단계: 전체 탐색 (360도)
+    for _ in range(8):
+        controller.step(action='RotateRight', degrees=45)
+        capture_callback()
+        
+        event = controller.last_event
+        visible_objs = [obj for obj in event.metadata['objects']
+                       if obj['visible'] and obj['objectType'] == object_type]
+        if visible_objs:
+            return visible_objs[0]
+    
+    return None
 
 
 def bfs_path(nodes, adj, start_pos, goal_pos):
@@ -203,41 +340,22 @@ class TaskExecutor:
                 return obj
         return None
     
-    def scan_and_find_visible_object(self, object_type, max_rotations=12):
-        """회전하며 객체를 시야에서 찾기"""
+    def scan_and_find_visible_object(self, object_type, max_retries=2):
+        """회전하며 객체를 시야에서 찾기 (재이동 포함)"""
         print(f"  🔍 {object_type} 탐색 중...")
         
-        for horizon_angle in [0, 30, -30, 15, -15]:
-            if horizon_angle > 0:
-                self.controller.step(action='LookDown', degrees=abs(horizon_angle))
-            elif horizon_angle < 0:
-                self.controller.step(action='LookUp', degrees=abs(horizon_angle))
-            self.capture_frame()
+        for retry in range(max_retries):
+            # 스마트 탐색 사용
+            found_obj = smart_object_search(self.controller, object_type, self.capture_frame)
             
-            for rotation_step in range(max_rotations):
-                if rotation_step > 0:
-                    self.controller.step(action='RotateRight', degrees=30)
-                    self.capture_frame()
-                
-                event = self.controller.last_event
-                for obj in event.metadata['objects']:
-                    if obj['objectType'] == object_type and obj['visible']:
-                        print(f"  ✓ {object_type} 발견!")
-                        # 시야각 원복
-                        if horizon_angle != 0:
-                            if horizon_angle > 0:
-                                self.controller.step(action='LookUp', degrees=abs(horizon_angle))
-                            else:
-                                self.controller.step(action='LookDown', degrees=abs(horizon_angle))
-                            self.capture_frame()
-                        return obj
+            if found_obj:
+                print(f"  ✓ {object_type} 발견!")
+                return found_obj
             
-            # 시야각 원복
-            if horizon_angle != 0:
-                if horizon_angle > 0:
-                    self.controller.step(action='LookUp', degrees=abs(horizon_angle))
-                else:
-                    self.controller.step(action='LookDown', degrees=abs(horizon_angle))
+            # 못 찾으면 조금 이동 후 재시도
+            if retry < max_retries - 1:
+                print(f"  ⚠️  {object_type} 못 찾음, 재이동 시도 {retry + 1}/{max_retries - 1}")
+                self.controller.step(action='MoveAhead', moveMagnitude=0.3)
                 self.capture_frame()
         
         return None
@@ -358,42 +476,64 @@ class TaskExecutor:
         
         print(f"  위치: ({item['position']['x']:.2f}, {item['position']['y']:.2f}, {item['position']['z']:.2f})")
         
-        # 2단계: 아이템으로 이동
+        # 2단계: 내장 네비게이션으로 이동
         print(f"\n[2/5] {item_name}으로 이동")
-        if not self.move_to_target(item['position'], stop_distance=0.5):
-            print(f"❌ {item_name}에 도달 실패")
+        found_item = navigate_to_obj_and_interact(self.controller, item, self.capture_frame)
+        
+        if not found_item:
+            print(f"❌ {item_name}와 상호작용 불가")
             return False
         
-        # 정면 맞추고 근접
-        self.approach_and_face(item['position'], stop_distance=0.45)
+        print(f"  ✓ {item_name} 발견!")
         
         # 3단계: 자르기
         print(f"\n[3/5] {item_name} 자르기")
-        visible_item = self.scan_and_find_visible_object(item_name)
-        if not visible_item:
-            print(f"❌ {item_name}을(를) 시야에서 찾지 못함")
-            return False
+        event = self.controller.step(
+            action='SliceObject',
+            objectId=found_item['objectId']
+        )
+        self.capture_frame()
         
-        self.approach_and_face(visible_item['position'], stop_distance=0.45)
-        
-        if not self.slice_object(visible_item):
+        if not event.metadata['lastActionSuccess']:
             print(f"❌ {item_name} 자르기 실패")
             return False
         
-        # 자른 조각 찾기 (TomatoSliced 등)
-        sliced_name = f"{item_name}Sliced"
-        sliced_item = self.find_object(sliced_name)
-        if not sliced_item:
-            print(f"⚠️ 자른 조각 {sliced_name}을(를) 찾지 못함, 원본으로 진행")
-            sliced_item = visible_item
+        print(f"  ✓ 자르기 완료!")
         
-        # 자른 조각 픽업
-        visible_sliced = self.scan_and_find_visible_object(sliced_name if sliced_item else item_name)
-        if visible_sliced:
-            self.approach_and_face(visible_sliced['position'], stop_distance=0.45)
-            if not self.pickup_object(visible_sliced):
-                print(f"❌ {sliced_name} 픽업 실패")
-                return False
+        # 자른 조각 찾기
+        sliced_name = f"{item_name}Sliced"
+        for rotation_count in range(4):
+            event = self.controller.last_event
+            visible_slices = [obj for obj in event.metadata['objects']
+                            if 'Sliced' in obj['objectType'] and 
+                            item_name in obj['objectType'] and
+                            obj['visible']]
+            
+            if visible_slices:
+                sliced_item = visible_slices[0]
+                print(f"  ✓ {sliced_name} 발견!")
+                break
+            
+            if rotation_count < 3:
+                self.controller.step(action='RotateRight', degrees=90)
+                self.capture_frame()
+        else:
+            print(f"❌ {sliced_name}을(를) 찾을 수 없음")
+            return False
+        
+        # 픽업
+        print(f"  📦 {sliced_name} 픽업 시도...")
+        event = self.controller.step(
+            action='PickupObject',
+            objectId=sliced_item['objectId']
+        )
+        self.capture_frame()
+        
+        if not event.metadata['lastActionSuccess']:
+            print(f"❌ 픽업 실패")
+            return False
+        
+        print(f"  ✓ 픽업 성공!")
         
         # 4단계: 저장소 찾기 및 이동
         print(f"\n[4/5] {storage_name} 찾기 및 이동")
@@ -404,28 +544,45 @@ class TaskExecutor:
         
         print(f"  위치: ({storage['position']['x']:.2f}, {storage['position']['y']:.2f}, {storage['position']['z']:.2f})")
         
-        if not self.move_to_target(storage['position'], stop_distance=0.8):
-            print(f"❌ {storage_name}에 도달 실패")
+        found_storage = navigate_to_obj_and_interact(self.controller, storage, self.capture_frame)
+        
+        if not found_storage:
+            print(f"❌ {storage_name}와 상호작용 불가")
             return False
         
-        self.approach_and_face(storage['position'], stop_distance=0.6)
+        print(f"  ✓ {storage_name} 발견!")
         
         # 5단계: 저장소 열고 넣기
         print(f"\n[5/5] {storage_name}에 넣기")
-        visible_storage = self.scan_and_find_visible_object(storage_name)
-        if not visible_storage:
-            print(f"❌ {storage_name}을(를) 시야에서 찾지 못함")
+        
+        # 열기
+        print(f"  🚪 {storage_name} 여는 중...")
+        event = self.controller.step(
+            action='OpenObject',
+            objectId=found_storage['objectId']
+        )
+        self.capture_frame()
+        
+        if not event.metadata['lastActionSuccess']:
+            print(f"❌ 열기 실패")
             return False
         
-        self.approach_and_face(visible_storage['position'], stop_distance=0.6)
+        print(f"  ✓ 열기 성공!")
         
-        if not self.open_object(visible_storage):
-            print(f"⚠️ {storage_name} 열기 실패, 그대로 진행")
+        # 넣기
+        print(f"  📥 {storage_name}에 놓는 중...")
+        event = self.controller.step(
+            action='PutObject',
+            objectId=found_storage['objectId'],
+            forceAction=True
+        )
+        self.capture_frame()
         
-        if not self.put_object(visible_storage):
-            print(f"❌ {storage_name}에 놓기 실패")
+        if not event.metadata['lastActionSuccess']:
+            print(f"❌ 놓기 실패")
             return False
         
+        print(f"  ✓ 놓기 성공!")
         print(f"\n✅ 작업 완료!")
         return True
 
@@ -446,22 +603,12 @@ def main():
     fps = 6
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     
-    video_writers = {
-        'topview': cv2.VideoWriter(
-            os.path.join(output_dir, f'task_topview_{timestamp}.mp4'),
-            fourcc, fps, (800, 600)
-        ),
-        'agent_pov': cv2.VideoWriter(
-            os.path.join(output_dir, f'task_agent_{timestamp}.mp4'),
-            fourcc, fps, (800, 600)
-        )
-    }
-    
     frame_count = 0
     controller = None
+    video_writers = {}
     
     def capture_frame():
-        """프레임 캡처"""
+        """프레임 캡처 (원본 해상도)"""
         nonlocal frame_count
         event = controller.last_event
         
@@ -469,12 +616,28 @@ def main():
         if event.third_party_camera_frames and len(event.third_party_camera_frames) > 0:
             topdown_frame = event.third_party_camera_frames[0]
             if topdown_frame is not None and topdown_frame.size > 0:
+                # 원본 해상도 그대로 사용 (resize 제거)
                 topdown_bgr = cv2.cvtColor(topdown_frame, cv2.COLOR_RGB2BGR)
+                
+                # 텍스트 오버레이: Top View와 Frame 번호
+                cv2.putText(topdown_bgr, "Top View", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.putText(topdown_bgr, f"Frame {frame_count + 1}", (10, 70), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                
                 video_writers['topview'].write(topdown_bgr)
         
         # Agent POV
         if event.frame is not None and event.frame.size > 0:
+            # 원본 해상도 그대로 사용 (resize 제거)
             agent_bgr = cv2.cvtColor(event.frame, cv2.COLOR_RGB2BGR)
+            
+            # 텍스트 오버레이: Agent 0와 Frame 번호
+            cv2.putText(agent_bgr, "Agent 0", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.putText(agent_bgr, f"Frame {frame_count + 1}", (10, 70), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
             video_writers['agent_pov'].write(agent_bgr)
         
         frame_count += 1
@@ -490,6 +653,21 @@ def main():
             fieldOfView=90,
             visibilityDistance=10.0
         )
+        
+        # Controller 초기화 후 비디오 라이터 생성 (원본 해상도 사용)
+        video_writers = {
+            'topview': cv2.VideoWriter(
+                os.path.join(output_dir, f'task_topview_{timestamp}.mp4'),
+                fourcc, fps, (controller.last_event.frame.shape[1], 
+                             controller.last_event.frame.shape[0])
+            ),
+            'agent_pov': cv2.VideoWriter(
+                os.path.join(output_dir, f'task_agent_{timestamp}.mp4'),
+                fourcc, fps, (controller.last_event.frame.shape[1], 
+                             controller.last_event.frame.shape[0])
+            )
+        }
+        
         print("✓ 초기화 완료")
         
         # Scene 정보
@@ -565,12 +743,7 @@ def main():
         print(f"📊 작업 결과: {'✓ 성공' if success else '✗ 실패'}")
         print(f"{'='*60}")
         
-        # 마무리 프레임
-        print("\n📹 마무리 프레임...")
-        for _ in range(10):
-            controller.step(action='RotateRight', degrees=30)
-            capture_frame()
-        
+        # 마무리
         print(f"\n✓ 녹화 완료 (총 {frame_count} 프레임)")
         print(f"📁 저장: task_topview_{timestamp}.mp4, task_agent_{timestamp}.mp4")
         

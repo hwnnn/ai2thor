@@ -84,7 +84,11 @@ Return your response as a JSON object with this structure:
   "reasoning": "brief explanation"
 }}
 
-The num_agents should be the MINIMUM number of agents needed (1-4).
+The num_agents should be EXACTLY equal to the number of tasks (1-3).
+IMPORTANT: num_agents MUST match the number of tasks.
+- 1 task = 1 agent
+- 2 tasks = 2 agents
+- 3 tasks = 3 agents
 
 Examples:
 
@@ -104,7 +108,21 @@ Output:
     }}
   ],
   "num_agents": 2,
-  "reasoning": "Two independent tasks that can run in parallel."
+  "reasoning": "Two independent tasks that can run in parallel, so 2 agents needed."
+}}
+
+Input: "토마토를 썰어서 냉장고에 넣어줘"
+Output:
+{{
+  "tasks": [
+    {{
+      "type": "slice_and_store",
+      "description": "토마토를 썰어서 냉장고에 넣기",
+      "parameters": {{"source_object": "Tomato", "target_object": "Fridge"}}
+    }}
+  ],
+  "num_agents": 1,
+  "reasoning": "One task, so only 1 agent needed."
 }}
 
 Now analyze: "{user_command}"
@@ -158,7 +176,8 @@ def main():
     
     # 작업 변환
     tasks = convert_to_task_format(llm_result)
-    num_agents = min(llm_result['num_agents'], 4)
+    # 작업 수에 맞춰 에이전트 수 결정 (최소값 사용)
+    num_agents = min(len(tasks), llm_result.get('num_agents', len(tasks)), 3)
     
     print(f"\n{'='*60}")
     print("📋 실행 계획:")
@@ -176,28 +195,28 @@ def main():
     fps = 6
     fourcc = cv2.VideoWriter_fourcc(*'avc1')
     
-    # 비디오 라이터
-    video_writers = {}
-    for i in range(num_agents):
-        video_writers[f'agent{i}'] = cv2.VideoWriter(
-            os.path.join(output_dir, f'ai_agent{i}_{timestamp}.mp4'),
-            fourcc, fps, (800, 600)
-        )
-    
     frame_count = [0]
     controller = None
+    video_writers = {}
     
     def capture_frame_wrapper():
-        """프레임 캡처"""
+        """프레임 캡처 (원본 해상도)"""
         event = controller.last_event
         for i in range(num_agents):
             if event.events[i].frame is not None and event.events[i].frame.size > 0:
                 frame = event.events[i].frame
-                if frame.shape[:2] != (600, 800):
-                    frame = cv2.resize(frame, (800, 600))
+                # 원본 해상도 그대로 사용 (resize 제거)
                 agent_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                
+                # 텍스트 오버레이: Agent 번호와 Frame 번호
+                cv2.putText(agent_bgr, f"Agent {i}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.putText(agent_bgr, f"Frame {frame_count[0] + 1}", (10, 70), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                
                 video_writers[f'agent{i}'].write(agent_bgr)
         frame_count[0] += 1
+        print(f"[FRAME {frame_count[0]}]", flush=True)  # 디버그 로그
     
     try:
         # Controller 초기화
@@ -210,6 +229,15 @@ def main():
             fieldOfView=90,
             visibilityDistance=10.0
         )
+        
+        # Controller 초기화 후 비디오 라이터 생성 (원본 해상도 사용)
+        for i in range(num_agents):
+            video_writers[f'agent{i}'] = cv2.VideoWriter(
+                os.path.join(output_dir, f'ai_agent{i}_{timestamp}.mp4'),
+                fourcc, fps, (controller.last_event.events[i].frame.shape[1], 
+                             controller.last_event.events[i].frame.shape[0])
+            )
+        
         print("✓ 초기화 완료\n")
         
         # 에이전트 시작 위치
@@ -217,7 +245,6 @@ def main():
             {'x': 0.0, 'y': 0.91, 'z': 0.0},
             {'x': 2.0, 'y': 0.91, 'z': 0.0},
             {'x': -2.0, 'y': 0.91, 'z': 0.0},
-            {'x': 0.0, 'y': 0.91, 'z': 2.0},
         ]
         
         for i in range(num_agents):
@@ -230,6 +257,7 @@ def main():
                 horizon=0,
                 standing=True
             )
+            capture_frame_wrapper()  # 초기 위치 프레임 캡처
             print(f"📍 Agent{i}: ({start_pos['x']:.2f}, {start_pos['z']:.2f})")
         
         capture_frame_wrapper()
@@ -288,8 +316,6 @@ def main():
         
         # 마무리
         print(f"\n📹 마무리 중...")
-        for _ in range(10):
-            capture_frame_wrapper()
         
         print(f"\n✓ 녹화 완료 (총 {frame_count[0]} 프레임)")
         print(f"📁 저장:")

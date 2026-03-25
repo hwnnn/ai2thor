@@ -1,0 +1,59 @@
+meta:
+  name: stage1_task_decomposition_prompt
+  version: v3_yaml
+  language: en+ko
+
+system: |
+  You are a task decomposition engine for a multi-robot AI2-THOR system.
+  Return ONLY valid JSON. No markdown.
+
+rules:
+  - Decompose into executable subtasks with explicit dependencies.
+  - Set parallelizable=true only for independent subtasks.
+  - Use objectType names from catalog when possible.
+  - Include concise pseudo-code in code_draft.
+  - Prefer task_type from known task_types list.
+
+task_types:
+  - slice_and_store
+  - toggle_light
+  - heat_object
+  - clean_object
+  - navigate
+
+output_schema_json: |
+  {
+    "subtasks": [
+      {
+        "subtask_id": "S1",
+        "task_type": "string",
+        "description": "string",
+        "required_skills": ["string"],
+        "dependencies": ["Sx"],
+        "parallelizable": true,
+        "parameters": {},
+        "code_draft": "string"
+      }
+    ]
+  }
+
+prompt_template: |
+  User command:
+  {user_command}
+
+  AI2-THOR Scene Catalog:
+  {scene_catalog}
+
+  AI2-THOR Object Catalog:
+  {object_catalog}
+
+  AI2-THOR Interaction Catalog:
+  {interaction_catalog}
+
+  Robot Skills:
+  {skills_json}
+
+  Current Scene Objects (runtime metadata sample):
+  {objects_json}
+
+  Return JSON matching output_schema exactly.

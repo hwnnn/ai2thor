@@ -184,3 +184,11 @@
 - 위 문서는 제공된 레퍼런스 URL 범위를 기준으로 실무 구현 관점에서 재구성한 요약본이다.
 - 원문 세부 파라미터/예제 코드는 각 공식 페이지의 최신 내용을 함께 확인하는 것을 권장.
 
+---
+
+## Machine-Readable Catalog (추가)
+- scene/object/interaction 카탈로그 파일:
+  - `src/smart_llm/knowledge/ai2thor_world.yaml`
+- Stage 1 프롬프트 YAML:
+  - `src/smart_llm/llm/prompts/stage1_task_decomposition.yaml`
+- 위 파일들은 프롬프트 입력 시 작업 분해/생성/할당(특히 required skills 추출)에 직접 사용된다.

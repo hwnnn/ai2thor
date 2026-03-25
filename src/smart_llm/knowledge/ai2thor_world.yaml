@@ -1,0 +1,1095 @@
+{
+  "meta": {
+    "name": "ai2thor_world_knowledge",
+    "version": "2026-02-27",
+    "source": "AI2THOR_API_REFERENCE_SUMMARY.md + iTHOR naming conventions",
+    "notes": [
+      "Scenes are enumerated explicitly for kitchen/living room/bedroom/bathroom base sets.",
+      "Object list is designed for decomposition/allocation context and can be extended safely.",
+      "Interactions map actions to required robot skills for coalition/allocation reasoning."
+    ]
+  },
+  "scenes": {
+    "kitchen": [
+      "FloorPlan1",
+      "FloorPlan2",
+      "FloorPlan3",
+      "FloorPlan4",
+      "FloorPlan5",
+      "FloorPlan6",
+      "FloorPlan7",
+      "FloorPlan8",
+      "FloorPlan9",
+      "FloorPlan10",
+      "FloorPlan11",
+      "FloorPlan12",
+      "FloorPlan13",
+      "FloorPlan14",
+      "FloorPlan15",
+      "FloorPlan16",
+      "FloorPlan17",
+      "FloorPlan18",
+      "FloorPlan19",
+      "FloorPlan20",
+      "FloorPlan21",
+      "FloorPlan22",
+      "FloorPlan23",
+      "FloorPlan24",
+      "FloorPlan25",
+      "FloorPlan26",
+      "FloorPlan27",
+      "FloorPlan28",
+      "FloorPlan29",
+      "FloorPlan30"
+    ],
+    "living_room": [
+      "FloorPlan201",
+      "FloorPlan202",
+      "FloorPlan203",
+      "FloorPlan204",
+      "FloorPlan205",
+      "FloorPlan206",
+      "FloorPlan207",
+      "FloorPlan208",
+      "FloorPlan209",
+      "FloorPlan210",
+      "FloorPlan211",
+      "FloorPlan212",
+      "FloorPlan213",
+      "FloorPlan214",
+      "FloorPlan215",
+      "FloorPlan216",
+      "FloorPlan217",
+      "FloorPlan218",
+      "FloorPlan219",
+      "FloorPlan220",
+      "FloorPlan221",
+      "FloorPlan222",
+      "FloorPlan223",
+      "FloorPlan224",
+      "FloorPlan225",
+      "FloorPlan226",
+      "FloorPlan227",
+      "FloorPlan228",
+      "FloorPlan229",
+      "FloorPlan230"
+    ],
+    "bedroom": [
+      "FloorPlan301",
+      "FloorPlan302",
+      "FloorPlan303",
+      "FloorPlan304",
+      "FloorPlan305",
+      "FloorPlan306",
+      "FloorPlan307",
+      "FloorPlan308",
+      "FloorPlan309",
+      "FloorPlan310",
+      "FloorPlan311",
+      "FloorPlan312",
+      "FloorPlan313",
+      "FloorPlan314",
+      "FloorPlan315",
+      "FloorPlan316",
+      "FloorPlan317",
+      "FloorPlan318",
+      "FloorPlan319",
+      "FloorPlan320",
+      "FloorPlan321",
+      "FloorPlan322",
+      "FloorPlan323",
+      "FloorPlan324",
+      "FloorPlan325",
+      "FloorPlan326",
+      "FloorPlan327",
+      "FloorPlan328",
+      "FloorPlan329",
+      "FloorPlan330"
+    ],
+    "bathroom": [
+      "FloorPlan401",
+      "FloorPlan402",
+      "FloorPlan403",
+      "FloorPlan404",
+      "FloorPlan405",
+      "FloorPlan406",
+      "FloorPlan407",
+      "FloorPlan408",
+      "FloorPlan409",
+      "FloorPlan410",
+      "FloorPlan411",
+      "FloorPlan412",
+      "FloorPlan413",
+      "FloorPlan414",
+      "FloorPlan415",
+      "FloorPlan416",
+      "FloorPlan417",
+      "FloorPlan418",
+      "FloorPlan419",
+      "FloorPlan420",
+      "FloorPlan421",
+      "FloorPlan422",
+      "FloorPlan423",
+      "FloorPlan424",
+      "FloorPlan425",
+      "FloorPlan426",
+      "FloorPlan427",
+      "FloorPlan428",
+      "FloorPlan429",
+      "FloorPlan430"
+    ],
+    "all": [
+      "FloorPlan1",
+      "FloorPlan2",
+      "FloorPlan3",
+      "FloorPlan4",
+      "FloorPlan5",
+      "FloorPlan6",
+      "FloorPlan7",
+      "FloorPlan8",
+      "FloorPlan9",
+      "FloorPlan10",
+      "FloorPlan11",
+      "FloorPlan12",
+      "FloorPlan13",
+      "FloorPlan14",
+      "FloorPlan15",
+      "FloorPlan16",
+      "FloorPlan17",
+      "FloorPlan18",
+      "FloorPlan19",
+      "FloorPlan20",
+      "FloorPlan21",
+      "FloorPlan22",
+      "FloorPlan23",
+      "FloorPlan24",
+      "FloorPlan25",
+      "FloorPlan26",
+      "FloorPlan27",
+      "FloorPlan28",
+      "FloorPlan29",
+      "FloorPlan30",
+      "FloorPlan201",
+      "FloorPlan202",
+      "FloorPlan203",
+      "FloorPlan204",
+      "FloorPlan205",
+      "FloorPlan206",
+      "FloorPlan207",
+      "FloorPlan208",
+      "FloorPlan209",
+      "FloorPlan210",
+      "FloorPlan211",
+      "FloorPlan212",
+      "FloorPlan213",
+      "FloorPlan214",
+      "FloorPlan215",
+      "FloorPlan216",
+      "FloorPlan217",
+      "FloorPlan218",
+      "FloorPlan219",
+      "FloorPlan220",
+      "FloorPlan221",
+      "FloorPlan222",
+      "FloorPlan223",
+      "FloorPlan224",
+      "FloorPlan225",
+      "FloorPlan226",
+      "FloorPlan227",
+      "FloorPlan228",
+      "FloorPlan229",
+      "FloorPlan230",
+      "FloorPlan301",
+      "FloorPlan302",
+      "FloorPlan303",
+      "FloorPlan304",
+      "FloorPlan305",
+      "FloorPlan306",
+      "FloorPlan307",
+      "FloorPlan308",
+      "FloorPlan309",
+      "FloorPlan310",
+      "FloorPlan311",
+      "FloorPlan312",
+      "FloorPlan313",
+      "FloorPlan314",
+      "FloorPlan315",
+      "FloorPlan316",
+      "FloorPlan317",
+      "FloorPlan318",
+      "FloorPlan319",
+      "FloorPlan320",
+      "FloorPlan321",
+      "FloorPlan322",
+      "FloorPlan323",
+      "FloorPlan324",
+      "FloorPlan325",
+      "FloorPlan326",
+      "FloorPlan327",
+      "FloorPlan328",
+      "FloorPlan329",
+      "FloorPlan330",
+      "FloorPlan401",
+      "FloorPlan402",
+      "FloorPlan403",
+      "FloorPlan404",
+      "FloorPlan405",
+      "FloorPlan406",
+      "FloorPlan407",
+      "FloorPlan408",
+      "FloorPlan409",
+      "FloorPlan410",
+      "FloorPlan411",
+      "FloorPlan412",
+      "FloorPlan413",
+      "FloorPlan414",
+      "FloorPlan415",
+      "FloorPlan416",
+      "FloorPlan417",
+      "FloorPlan418",
+      "FloorPlan419",
+      "FloorPlan420",
+      "FloorPlan421",
+      "FloorPlan422",
+      "FloorPlan423",
+      "FloorPlan424",
+      "FloorPlan425",
+      "FloorPlan426",
+      "FloorPlan427",
+      "FloorPlan428",
+      "FloorPlan429",
+      "FloorPlan430"
+    ]
+  },
+  "interactions": [
+    {
+      "action": "MoveAhead",
+      "kind": "navigation",
+      "description": "agent forward move",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "MoveBack",
+      "kind": "navigation",
+      "description": "agent backward move",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "MoveLeft",
+      "kind": "navigation",
+      "description": "agent left strafe",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "MoveRight",
+      "kind": "navigation",
+      "description": "agent right strafe",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "RotateLeft",
+      "kind": "navigation",
+      "description": "agent rotate left",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "RotateRight",
+      "kind": "navigation",
+      "description": "agent rotate right",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "LookUp",
+      "kind": "navigation",
+      "description": "camera look up",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "LookDown",
+      "kind": "navigation",
+      "description": "camera look down",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "Teleport",
+      "kind": "navigation",
+      "description": "teleport agent",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "TeleportFull",
+      "kind": "navigation",
+      "description": "teleport with full pose",
+      "required_skills": [
+        "navigate"
+      ]
+    },
+    {
+      "action": "PickupObject",
+      "kind": "object",
+      "description": "pick up object",
+      "required_skills": [
+        "pickup"
+      ]
+    },
+    {
+      "action": "PutObject",
+      "kind": "object",
+      "description": "put held object into receptacle",
+      "required_skills": [
+        "place"
+      ]
+    },
+    {
+      "action": "OpenObject",
+      "kind": "object",
+      "description": "open openable object",
+      "required_skills": [
+        "open_close"
+      ]
+    },
+    {
+      "action": "CloseObject",
+      "kind": "object",
+      "description": "close openable object",
+      "required_skills": [
+        "open_close"
+      ]
+    },
+    {
+      "action": "ToggleObjectOn",
+      "kind": "object",
+      "description": "turn toggleable object on",
+      "required_skills": [
+        "toggle"
+      ]
+    },
+    {
+      "action": "ToggleObjectOff",
+      "kind": "object",
+      "description": "turn toggleable object off",
+      "required_skills": [
+        "toggle"
+      ]
+    },
+    {
+      "action": "SliceObject",
+      "kind": "object",
+      "description": "slice sliceable object",
+      "required_skills": [
+        "slice"
+      ]
+    },
+    {
+      "action": "BreakObject",
+      "kind": "object",
+      "description": "break breakable object",
+      "required_skills": [
+        "break"
+      ]
+    },
+    {
+      "action": "CookObject",
+      "kind": "object",
+      "description": "cook cookable object",
+      "required_skills": [
+        "cook"
+      ]
+    },
+    {
+      "action": "CleanObject",
+      "kind": "object",
+      "description": "clean dirtyable object",
+      "required_skills": [
+        "clean"
+      ]
+    },
+    {
+      "action": "DirtyObject",
+      "kind": "object",
+      "description": "dirty dirtyable object",
+      "required_skills": [
+        "clean"
+      ]
+    },
+    {
+      "action": "FillObjectWithLiquid",
+      "kind": "object",
+      "description": "fill object with liquid",
+      "required_skills": [
+        "fill"
+      ]
+    },
+    {
+      "action": "EmptyLiquidFromObject",
+      "kind": "object",
+      "description": "empty liquid from object",
+      "required_skills": [
+        "fill"
+      ]
+    },
+    {
+      "action": "UseUpObject",
+      "kind": "object",
+      "description": "use up consumable object",
+      "required_skills": [
+        "useup"
+      ]
+    }
+  ],
+  "interaction_to_skill": {
+    "MoveAhead": [
+      "navigate"
+    ],
+    "MoveBack": [
+      "navigate"
+    ],
+    "MoveLeft": [
+      "navigate"
+    ],
+    "MoveRight": [
+      "navigate"
+    ],
+    "RotateLeft": [
+      "navigate"
+    ],
+    "RotateRight": [
+      "navigate"
+    ],
+    "LookUp": [
+      "navigate"
+    ],
+    "LookDown": [
+      "navigate"
+    ],
+    "Teleport": [
+      "navigate"
+    ],
+    "TeleportFull": [
+      "navigate"
+    ],
+    "PickupObject": [
+      "pickup"
+    ],
+    "PutObject": [
+      "place"
+    ],
+    "OpenObject": [
+      "open_close"
+    ],
+    "CloseObject": [
+      "open_close"
+    ],
+    "ToggleObjectOn": [
+      "toggle"
+    ],
+    "ToggleObjectOff": [
+      "toggle"
+    ],
+    "SliceObject": [
+      "slice"
+    ],
+    "BreakObject": [
+      "break"
+    ],
+    "CookObject": [
+      "cook"
+    ],
+    "CleanObject": [
+      "clean"
+    ],
+    "DirtyObject": [
+      "clean"
+    ],
+    "FillObjectWithLiquid": [
+      "fill"
+    ],
+    "EmptyLiquidFromObject": [
+      "fill"
+    ],
+    "UseUpObject": [
+      "useup"
+    ]
+  },
+  "task_type_to_skills": {
+    "slice_and_store": [
+      "navigate",
+      "slice",
+      "pickup",
+      "open_close",
+      "place"
+    ],
+    "toggle_light": [
+      "navigate",
+      "toggle"
+    ],
+    "heat_object": [
+      "navigate",
+      "pickup",
+      "open_close",
+      "place",
+      "toggle"
+    ],
+    "clean_object": [
+      "navigate",
+      "pickup",
+      "place",
+      "toggle"
+    ],
+    "navigate": [
+      "navigate"
+    ]
+  },
+  "objects": [
+    {
+      "objectType": "AlarmClock",
+      "aliases": []
+    },
+    {
+      "objectType": "AluminumFoil",
+      "aliases": []
+    },
+    {
+      "objectType": "Apple",
+      "aliases": [
+        "사과",
+        "apple"
+      ]
+    },
+    {
+      "objectType": "AppleSliced",
+      "aliases": []
+    },
+    {
+      "objectType": "ArmChair",
+      "aliases": []
+    },
+    {
+      "objectType": "BaseballBat",
+      "aliases": []
+    },
+    {
+      "objectType": "BasketBall",
+      "aliases": []
+    },
+    {
+      "objectType": "Bathtub",
+      "aliases": []
+    },
+    {
+      "objectType": "BathtubBasin",
+      "aliases": []
+    },
+    {
+      "objectType": "Bed",
+      "aliases": []
+    },
+    {
+      "objectType": "Blinds",
+      "aliases": []
+    },
+    {
+      "objectType": "Book",
+      "aliases": []
+    },
+    {
+      "objectType": "Boots",
+      "aliases": []
+    },
+    {
+      "objectType": "Bottle",
+      "aliases": []
+    },
+    {
+      "objectType": "Bowl",
+      "aliases": []
+    },
+    {
+      "objectType": "Box",
+      "aliases": []
+    },
+    {
+      "objectType": "Bread",
+      "aliases": [
+        "빵",
+        "bread"
+      ]
+    },
+    {
+      "objectType": "BreadSliced",
+      "aliases": []
+    },
+    {
+      "objectType": "ButterKnife",
+      "aliases": []
+    },
+    {
+      "objectType": "Cabinet",
+      "aliases": []
+    },
+    {
+      "objectType": "Candle",
+      "aliases": []
+    },
+    {
+      "objectType": "CD",
+      "aliases": []
+    },
+    {
+      "objectType": "CellPhone",
+      "aliases": []
+    },
+    {
+      "objectType": "Chair",
+      "aliases": []
+    },
+    {
+      "objectType": "Cloth",
+      "aliases": []
+    },
+    {
+      "objectType": "CoffeeMachine",
+      "aliases": []
+    },
+    {
+      "objectType": "CoffeeTable",
+      "aliases": []
+    },
+    {
+      "objectType": "CounterTop",
+      "aliases": []
+    },
+    {
+      "objectType": "CreditCard",
+      "aliases": []
+    },
+    {
+      "objectType": "Cup",
+      "aliases": [
+        "컵",
+        "cup"
+      ]
+    },
+    {
+      "objectType": "Curtains",
+      "aliases": []
+    },
+    {
+      "objectType": "Desk",
+      "aliases": []
+    },
+    {
+      "objectType": "DeskLamp",
+      "aliases": []
+    },
+    {
+      "objectType": "Desktop",
+      "aliases": []
+    },
+    {
+      "objectType": "DiningTable",
+      "aliases": []
+    },
+    {
+      "objectType": "DishSponge",
+      "aliases": []
+    },
+    {
+      "objectType": "DogBed",
+      "aliases": []
+    },
+    {
+      "objectType": "Drawer",
+      "aliases": []
+    },
+    {
+      "objectType": "Dresser",
+      "aliases": []
+    },
+    {
+      "objectType": "Dumbbell",
+      "aliases": []
+    },
+    {
+      "objectType": "Egg",
+      "aliases": []
+    },
+    {
+      "objectType": "EggCracked",
+      "aliases": []
+    },
+    {
+      "objectType": "Faucet",
+      "aliases": [
+        "수도꼭지",
+        "faucet"
+      ]
+    },
+    {
+      "objectType": "FloorLamp",
+      "aliases": []
+    },
+    {
+      "objectType": "Footstool",
+      "aliases": []
+    },
+    {
+      "objectType": "Fork",
+      "aliases": []
+    },
+    {
+      "objectType": "Fridge",
+      "aliases": [
+        "냉장고",
+        "fridge"
+      ]
+    },
+    {
+      "objectType": "GarbageBag",
+      "aliases": []
+    },
+    {
+      "objectType": "GarbageCan",
+      "aliases": []
+    },
+    {
+      "objectType": "HandTowel",
+      "aliases": []
+    },
+    {
+      "objectType": "HandTowelHolder",
+      "aliases": []
+    },
+    {
+      "objectType": "HousePlant",
+      "aliases": []
+    },
+    {
+      "objectType": "Kettle",
+      "aliases": []
+    },
+    {
+      "objectType": "KeyChain",
+      "aliases": []
+    },
+    {
+      "objectType": "Knife",
+      "aliases": []
+    },
+    {
+      "objectType": "Ladle",
+      "aliases": []
+    },
+    {
+      "objectType": "Laptop",
+      "aliases": []
+    },
+    {
+      "objectType": "LaundryHamper",
+      "aliases": []
+    },
+    {
+      "objectType": "Lettuce",
+      "aliases": [
+        "상추",
+        "lettuce"
+      ]
+    },
+    {
+      "objectType": "LettuceSliced",
+      "aliases": []
+    },
+    {
+      "objectType": "LightSwitch",
+      "aliases": [
+        "전등스위치",
+        "불스위치",
+        "light switch"
+      ]
+    },
+    {
+      "objectType": "Microwave",
+      "aliases": [
+        "전자레인지",
+        "microwave"
+      ]
+    },
+    {
+      "objectType": "Mirror",
+      "aliases": []
+    },
+    {
+      "objectType": "Mug",
+      "aliases": [
+        "머그컵",
+        "mug"
+      ]
+    },
+    {
+      "objectType": "Newspaper",
+      "aliases": []
+    },
+    {
+      "objectType": "Ottoman",
+      "aliases": []
+    },
+    {
+      "objectType": "Painting",
+      "aliases": []
+    },
+    {
+      "objectType": "Pan",
+      "aliases": []
+    },
+    {
+      "objectType": "PaperTowelRoll",
+      "aliases": []
+    },
+    {
+      "objectType": "Pen",
+      "aliases": []
+    },
+    {
+      "objectType": "Pencil",
+      "aliases": []
+    },
+    {
+      "objectType": "PepperShaker",
+      "aliases": []
+    },
+    {
+      "objectType": "Pillow",
+      "aliases": []
+    },
+    {
+      "objectType": "Plate",
+      "aliases": [
+        "접시",
+        "plate"
+      ]
+    },
+    {
+      "objectType": "Plunger",
+      "aliases": []
+    },
+    {
+      "objectType": "Poster",
+      "aliases": []
+    },
+    {
+      "objectType": "Pot",
+      "aliases": []
+    },
+    {
+      "objectType": "Potato",
+      "aliases": [
+        "감자",
+        "potato"
+      ]
+    },
+    {
+      "objectType": "PotatoSliced",
+      "aliases": []
+    },
+    {
+      "objectType": "RemoteControl",
+      "aliases": []
+    },
+    {
+      "objectType": "RoomDecor",
+      "aliases": []
+    },
+    {
+      "objectType": "Safe",
+      "aliases": []
+    },
+    {
+      "objectType": "SaltShaker",
+      "aliases": []
+    },
+    {
+      "objectType": "ScrubBrush",
+      "aliases": []
+    },
+    {
+      "objectType": "Shelf",
+      "aliases": []
+    },
+    {
+      "objectType": "ShowerCurtain",
+      "aliases": []
+    },
+    {
+      "objectType": "ShowerDoor",
+      "aliases": []
+    },
+    {
+      "objectType": "ShowerGlass",
+      "aliases": []
+    },
+    {
+      "objectType": "Sink",
+      "aliases": []
+    },
+    {
+      "objectType": "SinkBasin",
+      "aliases": [
+        "싱크대",
+        "개수대",
+        "sink basin"
+      ]
+    },
+    {
+      "objectType": "SoapBar",
+      "aliases": []
+    },
+    {
+      "objectType": "SoapBottle",
+      "aliases": []
+    },
+    {
+      "objectType": "Sofa",
+      "aliases": []
+    },
+    {
+      "objectType": "Spatula",
+      "aliases": []
+    },
+    {
+      "objectType": "Spoon",
+      "aliases": []
+    },
+    {
+      "objectType": "SprayBottle",
+      "aliases": []
+    },
+    {
+      "objectType": "Statue",
+      "aliases": []
+    },
+    {
+      "objectType": "Stool",
+      "aliases": []
+    },
+    {
+      "objectType": "StoveBurner",
+      "aliases": [
+        "가스레인지",
+        "버너",
+        "stove burner"
+      ]
+    },
+    {
+      "objectType": "StoveKnob",
+      "aliases": []
+    },
+    {
+      "objectType": "TableTopDecor",
+      "aliases": []
+    },
+    {
+      "objectType": "TeddyBear",
+      "aliases": []
+    },
+    {
+      "objectType": "Television",
+      "aliases": []
+    },
+    {
+      "objectType": "TennisRacket",
+      "aliases": []
+    },
+    {
+      "objectType": "TissueBox",
+      "aliases": []
+    },
+    {
+      "objectType": "Toaster",
+      "aliases": [
+        "토스터",
+        "toaster"
+      ]
+    },
+    {
+      "objectType": "Toilet",
+      "aliases": []
+    },
+    {
+      "objectType": "ToiletPaper",
+      "aliases": []
+    },
+    {
+      "objectType": "ToiletPaperHanger",
+      "aliases": []
+    },
+    {
+      "objectType": "Tomato",
+      "aliases": [
+        "토마토",
+        "tomato"
+      ]
+    },
+    {
+      "objectType": "TomatoSliced",
+      "aliases": [
+        "토마토조각",
+        "slice tomato",
+        "sliced tomato"
+      ]
+    },
+    {
+      "objectType": "Towel",
+      "aliases": []
+    },
+    {
+      "objectType": "TowelHolder",
+      "aliases": []
+    },
+    {
+      "objectType": "TVStand",
+      "aliases": []
+    },
+    {
+      "objectType": "VacuumCleaner",
+      "aliases": []
+    },
+    {
+      "objectType": "Vase",
+      "aliases": []
+    },
+    {
+      "objectType": "Watch",
+      "aliases": []
+    },
+    {
+      "objectType": "WateringCan",
+      "aliases": []
+    },
+    {
+      "objectType": "Window",
+      "aliases": []
+    },
+    {
+      "objectType": "WineBottle",
+      "aliases": []
+    }
+  ]
+}

@@ -18,7 +18,9 @@ INTERACTABLE_HORIZONS = [-30, 0, 30, 60]
 ARRIVAL_TOLERANCE = 0.25
 WAYPOINT_TOLERANCE = 0.15
 AGENT_CLEARANCE = 0.75
+TIGHT_INTERACTION_AGENT_CLEARANCE = 0.5
 FALLBACK_POSE_RADIUS = 2.25
+STRICT_DISTANCE_GEOMETRY_MARGIN = 0.6
 
 
 def calculate_distance(pos1, pos2):
@@ -116,6 +118,31 @@ def _dedupe_poses(poses: Sequence[Dict[str, float]], current_rotation: float, cu
     return [row[1] for row in best_by_position.values()]
 
 
+def _pose_distance_to_object(pose: Dict[str, float], obj_pos: Dict[str, float]) -> float:
+    return calculate_distance(
+        obj_pos,
+        {"x": float(pose["x"]), "y": float(pose["y"]), "z": float(pose["z"])},
+    )
+
+
+def _should_enforce_strict_distance(
+    candidate_poses: Sequence[Dict[str, float]],
+    obj_pos: Dict[str, float],
+    max_distance: float | None,
+) -> bool:
+    if max_distance is None or not candidate_poses:
+        return False
+
+    interactable_poses = [
+        pose
+        for pose in candidate_poses
+        if str(pose.get("pose_source", "interactable")) == "interactable"
+    ]
+    poses_for_check = interactable_poses or list(candidate_poses)
+    closest_pose_distance = min(_pose_distance_to_object(pose, obj_pos) for pose in poses_for_check)
+    return closest_pose_distance <= max_distance + STRICT_DISTANCE_GEOMETRY_MARGIN
+
+
 def _query_interactable_poses(controller, agent_id, obj_id, positions):
     step_kwargs = _step_kwargs(agent_id)
     event = controller.step(
@@ -132,14 +159,21 @@ def _query_interactable_poses(controller, agent_id, obj_id, positions):
     return _action_return(event, agent_id) or []
 
 
-def _candidate_poses(controller, agent_id, obj_id, obj_pos, reachable_positions) -> List[Dict[str, float]]:
+def _candidate_poses(
+    controller,
+    agent_id,
+    obj_id,
+    obj_pos,
+    reachable_positions,
+    agent_clearance: float = AGENT_CLEARANCE,
+) -> List[Dict[str, float]]:
     metadata = _get_metadata(controller, agent_id)
     current_rotation = metadata["agent"]["rotation"]["y"]
     current_horizon = metadata["agent"].get("cameraHorizon", 0)
     other_positions = _other_agent_positions(controller, agent_id)
 
     filtered_positions = [
-        pos for pos in reachable_positions if _min_clearance(pos, other_positions) >= AGENT_CLEARANCE
+        pos for pos in reachable_positions if _min_clearance(pos, other_positions) >= agent_clearance
     ]
     poses = _query_interactable_poses(
         controller,
@@ -160,10 +194,7 @@ def _candidate_poses(controller, agent_id, obj_id, obj_pos, reachable_positions)
 
     unique_poses = _dedupe_poses(poses, current_rotation, current_horizon)
     unique_poses.sort(
-        key=lambda pose: calculate_distance(
-            obj_pos,
-            {"x": float(pose["x"]), "y": float(pose["y"]), "z": float(pose["z"])},
-        )
+        key=lambda pose: _pose_distance_to_object(pose, obj_pos)
     )
     scored = []
     step_kwargs = _step_kwargs(agent_id)
@@ -420,6 +451,8 @@ def navigate_to_object_iter(
     object_type,
     capture_callback,
     max_distance: float | None = None,
+    agent_clearance: float = AGENT_CLEARANCE,
+    strict_max_distance: bool = False,
 ) -> Generator[ActionResult, None, bool]:
     """
     객체까지 이동하여 상호작용 준비.
@@ -451,11 +484,24 @@ def navigate_to_object_iter(
 
     reachable_positions = _action_return(reach_event, agent_id) or []
 
-    candidate_poses = _candidate_poses(controller, agent_id, obj_id, obj_pos, reachable_positions)
+    candidate_poses = _candidate_poses(
+        controller,
+        agent_id,
+        obj_id,
+        obj_pos,
+        reachable_positions,
+        agent_clearance=agent_clearance,
+    )
     if not candidate_poses:
         print(f"  ❌ 상호작용 가능한 pose를 찾지 못함")
         yield _failure(f"navigate:{object_type}:no_interactable_pose")
         return False
+
+    effective_strict_max_distance = strict_max_distance and _should_enforce_strict_distance(
+        candidate_poses,
+        obj_pos,
+        max_distance,
+    )
 
     for i, pose in enumerate(candidate_poses[:5]):
         print(f"  📍 시도 {i+1}/{min(len(candidate_poses), 5)}: ({pose['x']:.2f}, {pose['z']:.2f})")
@@ -472,12 +518,14 @@ def navigate_to_object_iter(
 
         visible = yield from _visibility_sweep_iter(controller, agent_id, object_type, capture_callback)
         pose_source = str(pose.get("pose_source", "interactable"))
+        within_distance = _within_interaction_distance(get_metadata(), obj_id, max_distance)
         if visible and (
-            pose_source == "interactable"
-            or _within_interaction_distance(get_metadata(), obj_id, max_distance)
+            max_distance is None
+            or within_distance
+            or (pose_source == "interactable" and not effective_strict_max_distance)
         ):
             return True
-        if visible and pose_source != "interactable" and max_distance is not None:
+        if visible and max_distance is not None:
             actual_obj = next((obj for obj in get_metadata()["objects"] if obj.get("objectId") == obj_id), None)
             actual_distance = actual_obj.get("distance") if actual_obj is not None else None
             if actual_distance is not None:
@@ -492,9 +540,25 @@ def navigate_to_object_iter(
     return False
 
 
-def navigate_to_object(controller, agent_id, object_type, capture_callback, max_distance: float | None = None):
+def navigate_to_object(
+    controller,
+    agent_id,
+    object_type,
+    capture_callback,
+    max_distance: float | None = None,
+    agent_clearance: float = AGENT_CLEARANCE,
+    strict_max_distance: bool = False,
+):
     success = True
-    for result in navigate_to_object_iter(controller, agent_id, object_type, capture_callback, max_distance=max_distance):
+    for result in navigate_to_object_iter(
+        controller,
+        agent_id,
+        object_type,
+        capture_callback,
+        max_distance=max_distance,
+        agent_clearance=agent_clearance,
+        strict_max_distance=strict_max_distance,
+    ):
         success = result.success
         if not result.success:
             return False

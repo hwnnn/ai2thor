@@ -10,7 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from smart_llm.environment.navigation_utils import navigate_to_object
+from smart_llm.environment.navigation_utils import TIGHT_INTERACTION_AGENT_CLEARANCE, navigate_to_object
 
 
 def _agent_metadata(*, position, objects, action_return=None, success=True):
@@ -255,6 +255,166 @@ class FakeManyPoseController(FakeMultiAgentController):
         return event
 
 
+class FakeStrictPickupController(FakeMultiAgentController):
+    def __init__(self):
+        super().__init__()
+        self._target_object = {
+            "objectId": "Bread|strict",
+            "objectType": "Bread",
+            "position": {"x": 0.0, "y": 0.9, "z": 0.0},
+            "visible": False,
+            "distance": 2.0,
+        }
+        self._agent_positions = [{"x": -2.0, "y": 0.9, "z": -2.0}, {"x": -2.0, "y": 0.9, "z": -2.0}]
+        self.last_event = self._current_event()
+
+    def step(self, action, agentId=None, **kwargs):
+        self.actions.append((action, agentId, kwargs))
+        strict_reject_pose = {"x": -1.0, "y": 0.9, "z": 0.0, "rotation": 90.0, "horizon": 0.0, "standing": True}
+        strict_accept_pose = {"x": -1.0, "y": 0.9, "z": -0.25, "rotation": 90.0, "horizon": 0.0, "standing": True}
+
+        if action == "GetReachablePositions":
+            event = self._query_event(agentId, [strict_reject_pose, strict_accept_pose])
+        elif action == "GetInteractablePoses":
+            event = self._query_event(agentId, [strict_reject_pose, strict_accept_pose])
+        elif action == "GetShortestPathToPoint":
+            target = dict(kwargs["target"])
+            event = self._query_event(agentId, {"corners": [dict(self._agent_positions[agentId]), target]})
+        elif action == "TeleportFull":
+            self._agent_positions[agentId] = {"x": kwargs["x"], "y": kwargs["y"], "z": kwargs["z"]}
+            metadatas = []
+            for idx, position in enumerate(self._agent_positions):
+                visible = idx == agentId
+                if visible and round(position["z"], 2) == 0.0:
+                    distance = 1.35
+                elif visible:
+                    distance = 0.65
+                else:
+                    distance = 3.0
+                objects = [dict(self._target_object, visible=visible, distance=distance)]
+                metadatas.append(_agent_metadata(position=position, objects=objects, success=True))
+            event = _event(metadatas, top_success=True, top_action_return=[])
+        else:
+            raise AssertionError(f"Unexpected action: {action}")
+
+        self.last_event = event
+        return event
+
+
+class FakeClearanceSensitiveController(FakeMultiAgentController):
+    def __init__(self):
+        super().__init__()
+        self._target_object = {
+            "objectId": "Bread|clearance",
+            "objectType": "Bread",
+            "position": {"x": 0.0, "y": 0.9, "z": 0.0},
+            "visible": False,
+            "distance": 2.0,
+        }
+        self._agent_positions = [
+            {"x": -1.5, "y": 0.9, "z": 0.0},
+            {"x": -2.0, "y": 0.9, "z": -2.0},
+        ]
+        self.last_event = self._current_event()
+
+    def _query_event(self, agent_id, action_return):
+        metadatas = []
+        for idx, position in enumerate(self._agent_positions):
+            objects = [dict(self._target_object)]
+            objects[0]["visible"] = idx == agent_id
+            objects[0]["distance"] = 1.0 if idx == agent_id else 3.0
+            metadatas.append(
+                _agent_metadata(
+                    position=position,
+                    objects=objects,
+                    action_return=action_return if idx == agent_id else [],
+                    success=True,
+                )
+            )
+        return _event(metadatas, top_success=True, top_action_return=[])
+
+    def step(self, action, agentId=None, **kwargs):
+        self.actions.append((action, agentId, kwargs))
+        near_pose = {"x": -1.0, "y": 0.9, "z": 0.0, "rotation": 90.0, "horizon": 0.0, "standing": True}
+        far_pose = {"x": -1.0, "y": 0.9, "z": -1.0, "rotation": 45.0, "horizon": 0.0, "standing": True}
+
+        if action == "GetReachablePositions":
+            event = self._query_event(agentId, [near_pose, far_pose])
+        elif action == "GetInteractablePoses":
+            allowed = {
+                (round(pos["x"], 2), round(pos["z"], 2))
+                for pos in kwargs.get("positions", [])
+            }
+            returned = [
+                pose
+                for pose in [near_pose, far_pose]
+                if (round(pose["x"], 2), round(pose["z"], 2)) in allowed
+            ]
+            event = self._query_event(agentId, returned)
+        elif action == "GetShortestPathToPoint":
+            target = dict(kwargs["target"])
+            event = self._query_event(agentId, {"corners": [dict(self._agent_positions[agentId]), target]})
+        elif action == "TeleportFull":
+            self._agent_positions[agentId] = {"x": kwargs["x"], "y": kwargs["y"], "z": kwargs["z"]}
+            metadatas = []
+            for idx, position in enumerate(self._agent_positions):
+                visible = idx == agentId
+                if visible and round(position["z"], 2) == 0.0:
+                    distance = 0.6
+                elif visible:
+                    distance = 1.4
+                else:
+                    distance = 3.0
+                objects = [dict(self._target_object, visible=visible, distance=distance)]
+                metadatas.append(_agent_metadata(position=position, objects=objects, success=True))
+            event = _event(metadatas, top_success=True, top_action_return=[])
+        else:
+            raise AssertionError(f"Unexpected action: {action}")
+
+        self.last_event = event
+        return event
+
+
+class FakeUnreliableGeometryController(FakeMultiAgentController):
+    def __init__(self):
+        super().__init__()
+        self._target_object = {
+            "objectId": "Plate|weird",
+            "objectType": "Plate",
+            "position": {"x": 4.0, "y": 0.9, "z": 4.0},
+            "visible": False,
+            "distance": 4.2,
+        }
+        self._agent_positions = [{"x": -2.0, "y": 0.9, "z": -2.0}, {"x": -1.0, "y": 0.9, "z": -1.0}]
+        self.last_event = self._current_event()
+
+    def step(self, action, agentId=None, **kwargs):
+        self.actions.append((action, agentId, kwargs))
+        pose = {"x": 0.75, "y": 0.9, "z": 1.5, "rotation": 180.0, "horizon": 0.0, "standing": True}
+
+        if action == "GetReachablePositions":
+            event = self._query_event(agentId, [pose])
+        elif action == "GetInteractablePoses":
+            event = self._query_event(agentId, [pose])
+        elif action == "GetShortestPathToPoint":
+            target = dict(kwargs["target"])
+            event = self._query_event(agentId, {"corners": [dict(self._agent_positions[agentId]), target]})
+        elif action == "TeleportFull":
+            self._agent_positions[agentId] = {"x": kwargs["x"], "y": kwargs["y"], "z": kwargs["z"]}
+            metadatas = []
+            for idx, position in enumerate(self._agent_positions):
+                visible = idx == agentId
+                distance = 4.2 if visible else 3.0
+                objects = [dict(self._target_object, visible=visible, distance=distance)]
+                metadatas.append(_agent_metadata(position=position, objects=objects, success=True))
+            event = _event(metadatas, top_success=True, top_action_return=[])
+        else:
+            raise AssertionError(f"Unexpected action: {action}")
+
+        self.last_event = event
+        return event
+
+
 class TestNavigationUtils(unittest.TestCase):
     def test_navigate_uses_agent_specific_query_metadata_and_exact_pose_teleport(self):
         controller = FakeMultiAgentController()
@@ -330,6 +490,69 @@ class TestNavigationUtils(unittest.TestCase):
         self.assertTrue(teleports)
         self.assertAlmostEqual(teleports[0]["x"], -1.0)
         self.assertAlmostEqual(teleports[0]["z"], 0.0)
+
+    def test_navigate_strict_max_distance_skips_interactable_pose_that_is_still_too_far(self):
+        controller = FakeStrictPickupController()
+
+        success = navigate_to_object(
+            controller,
+            agent_id=1,
+            object_type="Bread",
+            capture_callback=lambda *_args, **_kwargs: None,
+            max_distance=1.15,
+            strict_max_distance=True,
+        )
+
+        self.assertTrue(success)
+        teleports = [kwargs for action, _agent_id, kwargs in controller.actions if action == "TeleportFull"]
+        self.assertEqual(len(teleports), 2)
+        self.assertAlmostEqual(teleports[0]["z"], 0.0)
+        self.assertAlmostEqual(teleports[1]["z"], -0.25)
+
+    def test_navigate_with_tighter_clearance_can_include_pickup_pose_near_other_agent(self):
+        controller = FakeClearanceSensitiveController()
+
+        failed = navigate_to_object(
+            controller,
+            agent_id=1,
+            object_type="Bread",
+            capture_callback=lambda *_args, **_kwargs: None,
+            max_distance=1.15,
+            strict_max_distance=True,
+        )
+        self.assertFalse(failed)
+
+        controller = FakeClearanceSensitiveController()
+        success = navigate_to_object(
+            controller,
+            agent_id=1,
+            object_type="Bread",
+            capture_callback=lambda *_args, **_kwargs: None,
+            max_distance=1.15,
+            agent_clearance=TIGHT_INTERACTION_AGENT_CLEARANCE,
+            strict_max_distance=True,
+        )
+
+        self.assertTrue(success)
+        teleports = [kwargs for action, _agent_id, kwargs in controller.actions if action == "TeleportFull"]
+        self.assertTrue(teleports)
+        self.assertAlmostEqual(teleports[0]["z"], 0.0)
+
+    def test_navigate_relaxes_strict_distance_when_object_geometry_is_unreliable(self):
+        controller = FakeUnreliableGeometryController()
+
+        success = navigate_to_object(
+            controller,
+            agent_id=1,
+            object_type="Plate",
+            capture_callback=lambda *_args, **_kwargs: None,
+            max_distance=1.15,
+            strict_max_distance=True,
+        )
+
+        self.assertTrue(success)
+        teleports = [kwargs for action, _agent_id, kwargs in controller.actions if action == "TeleportFull"]
+        self.assertEqual(len(teleports), 1)
 
 
 if __name__ == "__main__":

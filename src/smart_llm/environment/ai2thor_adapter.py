@@ -15,7 +15,7 @@ try:
 except Exception:  # pragma: no cover
     Controller = None  # type: ignore
 
-from .navigation_utils import navigate_to_object_iter
+from .navigation_utils import TIGHT_INTERACTION_AGENT_CLEARANCE, navigate_to_object_iter
 
 
 THOR_PROFILES = {
@@ -109,6 +109,13 @@ class AI2ThorAdapter:
             if value is not None:
                 return value
         return None
+
+    def _tight_interaction_navigation_kwargs(self, max_distance: float | None) -> Dict[str, Any]:
+        return {
+            "max_distance": max_distance,
+            "agent_clearance": TIGHT_INTERACTION_AGENT_CLEARANCE,
+            "strict_max_distance": True,
+        }
 
     def start(self, agent_count: int) -> None:
         self.context.agent_count = agent_count
@@ -645,7 +652,7 @@ class AI2ThorAdapter:
                     agent_id,
                     source_object,
                     capture_callback,
-                    max_distance=source_distance,
+                    **self._tight_interaction_navigation_kwargs(source_distance),
                 )
                 if not navigated:
                     return False
@@ -670,7 +677,7 @@ class AI2ThorAdapter:
                         agent_id,
                         pickup_target,
                         capture_callback,
-                        max_distance=pickup_distance,
+                        **self._tight_interaction_navigation_kwargs(pickup_distance),
                     )
                     if not navigated:
                         return False
@@ -730,7 +737,7 @@ class AI2ThorAdapter:
                     agent_id,
                     obj_type,
                     capture_callback,
-                    max_distance=portable_distance,
+                    **self._tight_interaction_navigation_kwargs(portable_distance),
                 )
                 if not navigated:
                     return False
@@ -824,7 +831,7 @@ class AI2ThorAdapter:
                     agent_id,
                     obj_type,
                     capture_callback,
-                    max_distance=portable_distance,
+                    **self._tight_interaction_navigation_kwargs(portable_distance),
                 )
                 if not navigated:
                     return False

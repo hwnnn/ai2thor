@@ -59,11 +59,60 @@ class DummyAdapter:
         }
 
 
+class DummyGranularAdapter:
+    def __init__(self):
+        self.model_name = "dummy-granular"
+
+    def generate_json(self, prompt: str):
+        if "빵" in prompt and "접시" in prompt:
+            return {
+                "subtasks": [
+                    {
+                        "subtask_id": "S1",
+                        "task_type": "navigate",
+                        "description": "Navigate to the Bread location",
+                        "required_skills": ["navigate"],
+                        "dependencies": [],
+                        "parallelizable": True,
+                        "parameters": {"target_object": "Bread"},
+                        "code_draft": "move_to_object('Bread')",
+                    },
+                    {
+                        "subtask_id": "S2",
+                        "task_type": "pickup",
+                        "description": "Pickup the Bread",
+                        "required_skills": ["pickup"],
+                        "dependencies": ["S1"],
+                        "parallelizable": False,
+                        "parameters": {"objectType": "Bread"},
+                        "code_draft": "pickup_object('Bread')",
+                    },
+                    {
+                        "subtask_id": "S3",
+                        "task_type": "clean_object",
+                        "description": "Clean the Plate",
+                        "required_skills": ["navigate", "pickup", "place", "toggle"],
+                        "dependencies": [],
+                        "parallelizable": False,
+                        "parameters": {"objectType": "Plate"},
+                        "code_draft": "clean_object('Plate')",
+                    },
+                ]
+            }
+        return DummyAdapter().generate_json(prompt)
+
+
 class TestIntegrationPipeline(unittest.TestCase):
     def _pipeline(self):
         cfg = RuntimeConfig(provider="echo", model="echo", dry_run=True)
         pipeline = SMARTPipeline(cfg)
         pipeline.adapter = DummyAdapter()
+        return pipeline
+
+    def _granular_pipeline(self):
+        cfg = RuntimeConfig(provider="echo", model="echo", dry_run=True)
+        pipeline = SMARTPipeline(cfg)
+        pipeline.adapter = DummyGranularAdapter()
         return pipeline
 
     def test_elemental_e2e(self):
@@ -78,6 +127,12 @@ class TestIntegrationPipeline(unittest.TestCase):
         self.assertGreaterEqual(len(run.stage1["subtasks"]), 2)
         groups = {a["thread_group"] for a in run.stage3["allocations"]}
         self.assertGreaterEqual(len(groups), 1)
+        self.assertEqual(run.artifacts["agent_count"], 2)
+
+    def test_granular_heat_and_clean_plan_is_normalized_to_two_agents(self):
+        run = self._granular_pipeline().run_once("빵을 전자레인지로 데우고, 접시를 씻어줘")
+        self.assertTrue(run.stage4["success"])
+        self.assertEqual([subtask["task_type"] for subtask in run.stage1["subtasks"]], ["heat_object", "clean_object"])
         self.assertEqual(run.artifacts["agent_count"], 2)
 
     def test_goal_states_drive_metrics(self):

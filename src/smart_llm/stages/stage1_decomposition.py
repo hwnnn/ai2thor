@@ -26,6 +26,19 @@ FALLBACK_TASK_SKILL_MAP = {
     "navigate": ["navigate"],
 }
 
+SLICEABLE_OBJECTS = ["Tomato", "Lettuce", "Potato", "Apple", "Bread"]
+STORAGE_OBJECTS = ["Fridge", "Cabinet", "CounterTop"]
+HEATABLE_OBJECTS = ["Bread", "Potato", "Apple"]
+CLEANABLE_OBJECTS = ["Plate", "Bowl", "Cup", "Mug"]
+REQUIRED_PARAMETERS = {
+    "navigate": ("target_object",),
+    "slice_and_store": ("source_object", "target_object"),
+    "toggle_light": ("action",),
+    "heat_object": ("object",),
+    "clean_object": ("object",),
+}
+SUPPORTED_TASK_TYPES = set(FALLBACK_TASK_SKILL_MAP)
+
 
 class Stage1Decomposer:
     def __init__(self, adapter: BaseLLMAdapter, validator: SchemaValidator):
@@ -56,6 +69,8 @@ class Stage1Decomposer:
                 raise RuntimeError(f"Stage 1 decomposition failed: {exc}") from exc
             payload = self._heuristic_decompose(user_command)
 
+        self.validator.validate_stage1(payload)
+        payload = self._normalize_payload(payload, user_command)
         self.validator.validate_stage1(payload)
         subtasks = [Subtask(**item) for item in payload["subtasks"]]
         return Stage1Output(subtasks=subtasks)
@@ -196,6 +211,168 @@ class Stage1Decomposer:
             )
 
         return {"subtasks": subtasks}
+
+    def _normalize_payload(self, payload: Dict[str, Any], user_command: str) -> Dict[str, Any]:
+        normalized = [
+            self._normalize_subtask(item, user_command)
+            for item in payload.get("subtasks", [])
+        ]
+        normalized = self._prune_redundant_navigate_subtasks(normalized)
+
+        if self._should_fallback_to_heuristic(normalized, user_command):
+            return self._heuristic_decompose(user_command)
+
+        return {"subtasks": normalized}
+
+    def _should_fallback_to_heuristic(self, subtasks: List[Dict[str, Any]], user_command: str) -> bool:
+        if not subtasks:
+            return True
+
+        task_types = [str(item.get("task_type", "")) for item in subtasks]
+        if any(task_type not in SUPPORTED_TASK_TYPES for task_type in task_types):
+            return True
+
+        if self._has_unresolved_required_parameters(subtasks):
+            return True
+
+        expected_task_types = self._expected_task_types(user_command)
+        actual_task_types = set(task_types)
+        if not set(expected_task_types).issubset(actual_task_types):
+            return True
+
+        return False
+
+    def _expected_task_types(self, user_command: str) -> List[str]:
+        command = user_command.lower()
+        expected: List[str] = []
+
+        if any(token in user_command for token in ["썰", "자르", "슬라이스"]) or "slice" in command:
+            expected.append("slice_and_store")
+        if "불" in user_command or "light" in command or "스위치" in user_command:
+            expected.append("toggle_light")
+        if "데우" in user_command or "heat" in command:
+            expected.append("heat_object")
+        if "씻" in user_command or "clean" in command:
+            expected.append("clean_object")
+
+        return expected or ["navigate"]
+
+    def _normalize_subtask(self, item: Dict[str, Any], user_command: str) -> Dict[str, Any]:
+        normalized = dict(item)
+        task_type = str(normalized.get("task_type", ""))
+        description = str(normalized.get("description", ""))
+        code_draft = str(normalized.get("code_draft", ""))
+        texts = [description, code_draft, user_command]
+        parameters = dict(normalized.get("parameters") or {})
+
+        normalized["required_skills"] = list(
+            self.task_skill_map.get(task_type, normalized.get("required_skills") or [])
+        )
+
+        if task_type == "navigate":
+            target = parameters.get("target_object") or self._infer_object_from_texts(texts)
+            if target:
+                parameters["target_object"] = target
+
+        elif task_type == "slice_and_store":
+            source = parameters.get("source_object") or self._infer_object_from_texts(texts, preferred=SLICEABLE_OBJECTS)
+            target = parameters.get("target_object") or self._infer_object_from_texts(texts, preferred=STORAGE_OBJECTS)
+            if source:
+                parameters["source_object"] = source
+            if target:
+                parameters["target_object"] = target
+
+        elif task_type == "toggle_light":
+            action = parameters.get("action")
+            if action not in {"켜기", "끄기"}:
+                parameters["action"] = self._infer_toggle_action(texts)
+
+        elif task_type == "heat_object":
+            obj_type = parameters.get("object") or self._infer_object_from_texts(texts, preferred=HEATABLE_OBJECTS)
+            if obj_type:
+                parameters["object"] = obj_type
+
+        elif task_type == "clean_object":
+            obj_type = parameters.get("object") or self._infer_object_from_texts(texts, preferred=CLEANABLE_OBJECTS)
+            if obj_type:
+                parameters["object"] = obj_type
+
+        normalized["parameters"] = {
+            key: value for key, value in parameters.items() if value is not None and value != ""
+        }
+        return normalized
+
+    def _infer_object_from_texts(self, texts: List[str], preferred: List[str] | None = None) -> str:
+        preferred = preferred or []
+        for text in texts:
+            if not text:
+                continue
+            matched = self._find_object_in_command(text, preferred=preferred, default="")
+            if matched:
+                return matched
+            inferred = infer_object_type_from_text(text, fallback="")
+            if inferred and (not preferred or inferred in preferred):
+                return inferred
+        return ""
+
+    def _infer_toggle_action(self, texts: List[str]) -> str:
+        joined = " ".join(texts).lower()
+        if "켜" in joined or " turn on " in f" {joined} " or " on " in f" {joined} ":
+            return "켜기"
+        return "끄기"
+
+    def _prune_redundant_navigate_subtasks(self, subtasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        dependents: Dict[str, List[str]] = {}
+        by_id = {item["subtask_id"]: item for item in subtasks}
+
+        for item in subtasks:
+            for dep in item.get("dependencies", []):
+                dependents.setdefault(dep, []).append(item["subtask_id"])
+
+        removable = set()
+        for item in subtasks:
+            if item.get("task_type") != "navigate":
+                continue
+            linked = dependents.get(item["subtask_id"], [])
+            if len(linked) != 1:
+                continue
+
+            dependent = by_id.get(linked[0])
+            target_object = (item.get("parameters") or {}).get("target_object")
+            if dependent is None or not target_object:
+                continue
+
+            if not self._navigate_is_redundant(target_object, dependent):
+                continue
+
+            removable.add(item["subtask_id"])
+            dependent["dependencies"] = [
+                dep for dep in dependent.get("dependencies", []) if dep != item["subtask_id"]
+            ]
+
+        return [item for item in subtasks if item["subtask_id"] not in removable]
+
+    def _navigate_is_redundant(self, target_object: str, dependent: Dict[str, Any]) -> bool:
+        params = dict(dependent.get("parameters") or {})
+        task_type = dependent.get("task_type")
+
+        if task_type == "slice_and_store":
+            return target_object == params.get("source_object")
+        if task_type == "heat_object":
+            return target_object == params.get("object")
+        if task_type == "clean_object":
+            return target_object == params.get("object")
+        if task_type == "toggle_light":
+            return target_object == "LightSwitch"
+        return False
+
+    def _has_unresolved_required_parameters(self, subtasks: List[Dict[str, Any]]) -> bool:
+        for item in subtasks:
+            required = REQUIRED_PARAMETERS.get(item.get("task_type"), ())
+            parameters = dict(item.get("parameters") or {})
+            if any(not parameters.get(name) for name in required):
+                return True
+        return False
 
     def _find_object_in_command(self, user_command: str, preferred: List[str], default: str) -> str:
         lowered = user_command.lower()

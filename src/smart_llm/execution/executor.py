@@ -246,7 +246,7 @@ class InterleavingExecutor:
         return int(digits) if digits else 0
 
     def _local_replan(self, task: ExecutableTask) -> ExecutableTask:
-        patched = ExecutableTask(
+        return ExecutableTask(
             subtask_id=task.subtask_id,
             task_type=task.task_type,
             parameters=dict(task.parameters),
@@ -254,17 +254,3 @@ class InterleavingExecutor:
             thread_group=task.thread_group,
             dependencies=list(task.dependencies),
         )
-
-        if patched.task_type == "toggle_light":
-            patched.parameters.setdefault("action", "끄기")
-        elif patched.task_type == "navigate":
-            patched.parameters.setdefault("target_object", "CounterTop")
-        elif patched.task_type == "slice_and_store":
-            patched.parameters.setdefault("source_object", "Tomato")
-            patched.parameters.setdefault("target_object", "Fridge")
-        elif patched.task_type == "heat_object":
-            patched.parameters.setdefault("object", "Bread")
-        elif patched.task_type == "clean_object":
-            patched.parameters.setdefault("object", "Plate")
-
-        return patched

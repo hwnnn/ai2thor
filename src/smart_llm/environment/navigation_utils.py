@@ -8,7 +8,7 @@ Navigation Utilities for AI2-THOR
 from __future__ import annotations
 
 import math
-from typing import Dict, Generator, List, Sequence, Tuple
+from typing import Any, Dict, Generator, List, Sequence, Tuple
 
 from smart_llm.models import ActionResult
 
@@ -18,6 +18,7 @@ INTERACTABLE_HORIZONS = [-30, 0, 30, 60]
 ARRIVAL_TOLERANCE = 0.25
 WAYPOINT_TOLERANCE = 0.15
 AGENT_CLEARANCE = 0.75
+FALLBACK_POSE_RADIUS = 2.25
 
 
 def calculate_distance(pos1, pos2):
@@ -51,6 +52,22 @@ def _get_metadata(controller, agent_id):
     if agent_id is not None:
         return controller.last_event.events[agent_id].metadata
     return controller.last_event.metadata
+
+
+def _event_metadata(event, agent_id):
+    if agent_id is not None and hasattr(event, "events"):
+        events = getattr(event, "events", None) or []
+        if 0 <= agent_id < len(events):
+            return events[agent_id].metadata
+    return getattr(event, "metadata", {}) or {}
+
+
+def _last_action_success(event, agent_id) -> bool:
+    return bool(_event_metadata(event, agent_id).get("lastActionSuccess"))
+
+
+def _action_return(event, agent_id):
+    return _event_metadata(event, agent_id).get("actionReturn")
 
 
 def _step_kwargs(agent_id):
@@ -110,9 +127,9 @@ def _query_interactable_poses(controller, agent_id, obj_id, positions):
         standings=[True],
         **step_kwargs,
     )
-    if not event.metadata["lastActionSuccess"]:
+    if not _last_action_success(event, agent_id):
         return []
-    return event.metadata.get("actionReturn") or []
+    return _action_return(event, agent_id) or []
 
 
 def _candidate_poses(controller, agent_id, obj_id, obj_pos, reachable_positions) -> List[Dict[str, float]]:
@@ -132,30 +149,91 @@ def _candidate_poses(controller, agent_id, obj_id, obj_pos, reachable_positions)
     )
     if not poses and filtered_positions:
         poses = _query_interactable_poses(controller, agent_id, obj_id, reachable_positions)
+    fallback_poses = _fallback_candidate_poses(
+        obj_pos=obj_pos,
+        reachable_positions=filtered_positions or reachable_positions,
+        current_rotation=current_rotation,
+        current_horizon=current_horizon,
+    )
     if not poses:
-        return []
+        return fallback_poses
 
     unique_poses = _dedupe_poses(poses, current_rotation, current_horizon)
+    unique_poses.sort(
+        key=lambda pose: calculate_distance(
+            obj_pos,
+            {"x": float(pose["x"]), "y": float(pose["y"]), "z": float(pose["z"])},
+        )
+    )
     scored = []
     step_kwargs = _step_kwargs(agent_id)
 
-    for pose in unique_poses[:24]:
+    for pose in unique_poses[:48]:
+        pose = dict(pose)
+        pose["pose_source"] = "interactable"
         target_pos = {"x": pose["x"], "y": pose["y"], "z": pose["z"]}
         path_event = controller.step(action="GetShortestPathToPoint", target=target_pos, **step_kwargs)
-        if not path_event.metadata["lastActionSuccess"]:
+        if not _last_action_success(path_event, agent_id):
             continue
-        corners = (path_event.metadata.get("actionReturn") or {}).get("corners") or []
+        corners = (_action_return(path_event, agent_id) or {}).get("corners") or []
         scored.append(
             (
+                calculate_distance(obj_pos, target_pos),
                 path_length(corners),
                 -_min_clearance(target_pos, other_positions),
-                calculate_distance(obj_pos, target_pos),
                 pose,
             )
         )
 
     scored.sort(key=lambda row: row[:3])
-    return [row[3] for row in scored]
+    ranked = [row[3] for row in scored]
+    if fallback_poses:
+        ranked.extend(
+            pose
+            for pose in fallback_poses
+            if not any(
+                round(pose["x"], 2) == round(existing["x"], 2)
+                and round(pose["z"], 2) == round(existing["z"], 2)
+                for existing in ranked
+            )
+        )
+    return ranked
+
+
+def _fallback_candidate_poses(
+    obj_pos: Dict[str, float],
+    reachable_positions: Sequence[Dict[str, float]],
+    current_rotation: float,
+    current_horizon: float,
+) -> List[Dict[str, float]]:
+    if not reachable_positions:
+        return []
+
+    nearby_positions = [
+        pos
+        for pos in reachable_positions
+        if calculate_distance(pos, obj_pos) <= FALLBACK_POSE_RADIUS
+    ]
+    candidate_positions = nearby_positions or sorted(
+        reachable_positions,
+        key=lambda pos: calculate_distance(pos, obj_pos),
+    )[:12]
+
+    poses: List[Dict[str, float]] = []
+    for pos in candidate_positions[:12]:
+        poses.append(
+            {
+                "x": float(pos["x"]),
+                "y": float(pos["y"]),
+                "z": float(pos["z"]),
+                "rotation": float(calculate_angle(pos, obj_pos)),
+                "horizon": 0.0,
+                "standing": True,
+                "pose_source": "fallback",
+            }
+        )
+
+    return _dedupe_poses(poses, current_rotation, current_horizon)
 
 
 def _progress(message: str, transitions: int = 1) -> ActionResult:
@@ -256,7 +334,7 @@ def _recovery_iter(
     for action, params in plan:
         event = controller.step(action=action, **params, **step_kwargs)
         _capture(capture_callback, event)
-        ok = bool(event.metadata.get("lastActionSuccess"))
+        ok = _last_action_success(event, agent_id)
         progressed = progressed or ok
         suffix = "ok" if ok else "blocked"
         yield _progress(f"recovery:{action.lower()}:{suffix}")
@@ -264,7 +342,85 @@ def _recovery_iter(
     return progressed
 
 
-def navigate_to_object_iter(controller, agent_id, object_type, capture_callback) -> Generator[ActionResult, None, bool]:
+def _teleport_pose_kwargs(pose: Dict[str, Any]) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {}
+
+    if "position" in pose:
+        kwargs["position"] = dict(pose["position"])
+    else:
+        kwargs["x"] = float(pose["x"])
+        kwargs["y"] = float(pose["y"])
+        kwargs["z"] = float(pose["z"])
+
+    rotation = pose.get("rotation")
+    if rotation is not None:
+        kwargs["rotation"] = float(rotation) if not isinstance(rotation, dict) else dict(rotation)
+
+    horizon = pose.get("horizon")
+    if horizon is not None:
+        kwargs["horizon"] = float(horizon)
+
+    standing = pose.get("standing")
+    if standing is not None:
+        kwargs["standing"] = bool(standing)
+
+    return kwargs
+
+
+def try_reach_pose_iter(
+    controller,
+    agent_id,
+    pose,
+    capture_callback,
+    max_steps=120,
+) -> Generator[ActionResult, None, bool]:
+    step_kwargs = _step_kwargs(agent_id)
+    teleport_event = controller.step(
+        action="TeleportFull",
+        **_teleport_pose_kwargs(pose),
+        **step_kwargs,
+    )
+    _capture(capture_callback, teleport_event)
+    if _last_action_success(teleport_event, agent_id):
+        yield _progress("move:teleportfull")
+        print("    ✓ 도착 (TeleportFull)")
+        return True
+
+    yield _progress("move:teleportfull:blocked")
+    return (
+        yield from try_reach_position_iter(
+            controller,
+            agent_id,
+            {"x": pose["x"], "y": pose["y"], "z": pose["z"]},
+            capture_callback,
+            max_steps=max_steps,
+            target_rotation=pose.get("rotation"),
+            target_horizon=pose.get("horizon"),
+        )
+    )
+
+
+def _within_interaction_distance(metadata, object_id, max_distance: float | None) -> bool:
+    if max_distance is None:
+        return True
+
+    for obj in metadata.get("objects", []):
+        if obj.get("objectId") != object_id or not obj.get("visible"):
+            continue
+        distance = obj.get("distance")
+        if distance is None:
+            return True
+        return float(distance) <= max_distance
+    return False
+
+
+def navigate_to_object_iter(
+    controller,
+    agent_id,
+    object_type,
+    capture_callback,
+    max_distance: float | None = None,
+) -> Generator[ActionResult, None, bool]:
     """
     객체까지 이동하여 상호작용 준비.
     Primitive action마다 ActionResult를 yield하므로 상위 executor가 다른 agent와 interleave할 수 있다.
@@ -288,12 +444,12 @@ def navigate_to_object_iter(controller, agent_id, object_type, capture_callback)
     print(f"  📍 목표: {obj_id}")
 
     reach_event = controller.step(action='GetReachablePositions', **_step_kwargs(agent_id))
-    if not reach_event.metadata['lastActionSuccess']:
+    if not _last_action_success(reach_event, agent_id):
         print(f"  ❌ GetReachablePositions 실패")
         yield _failure(f"navigate:{object_type}:reachable_positions_failed")
         return False
 
-    reachable_positions = reach_event.metadata['actionReturn']
+    reachable_positions = _action_return(reach_event, agent_id) or []
 
     candidate_poses = _candidate_poses(controller, agent_id, obj_id, obj_pos, reachable_positions)
     if not candidate_poses:
@@ -303,22 +459,31 @@ def navigate_to_object_iter(controller, agent_id, object_type, capture_callback)
 
     for i, pose in enumerate(candidate_poses[:5]):
         print(f"  📍 시도 {i+1}/{min(len(candidate_poses), 5)}: ({pose['x']:.2f}, {pose['z']:.2f})")
-        reached = yield from try_reach_position_iter(
+        reached = yield from try_reach_pose_iter(
             controller,
             agent_id,
-            {"x": pose["x"], "y": pose["y"], "z": pose["z"]},
+            pose,
             capture_callback,
             max_steps=120,
-            target_rotation=pose.get("rotation"),
-            target_horizon=pose.get("horizon"),
         )
         if not reached:
             print(f"  ⚠️ 시도 {i+1} 실패, 다음 목표 시도")
             continue
 
         visible = yield from _visibility_sweep_iter(controller, agent_id, object_type, capture_callback)
-        if visible:
+        pose_source = str(pose.get("pose_source", "interactable"))
+        if visible and (
+            pose_source == "interactable"
+            or _within_interaction_distance(get_metadata(), obj_id, max_distance)
+        ):
             return True
+        if visible and pose_source != "interactable" and max_distance is not None:
+            actual_obj = next((obj for obj in get_metadata()["objects"] if obj.get("objectId") == obj_id), None)
+            actual_distance = actual_obj.get("distance") if actual_obj is not None else None
+            if actual_distance is not None:
+                print(f"  ⚠️ 상호작용 거리 초과 ({float(actual_distance):.2f}m > {max_distance:.2f}m)")
+            else:
+                print(f"  ⚠️ 상호작용 거리 초과")
 
         print(f"  ⚠️ 시도 {i+1} 실패, 다음 목표 시도")
 
@@ -327,9 +492,9 @@ def navigate_to_object_iter(controller, agent_id, object_type, capture_callback)
     return False
 
 
-def navigate_to_object(controller, agent_id, object_type, capture_callback):
+def navigate_to_object(controller, agent_id, object_type, capture_callback, max_distance: float | None = None):
     success = True
-    for result in navigate_to_object_iter(controller, agent_id, object_type, capture_callback):
+    for result in navigate_to_object_iter(controller, agent_id, object_type, capture_callback, max_distance=max_distance):
         success = result.success
         if not result.success:
             return False
@@ -365,10 +530,10 @@ def try_reach_position_iter(
 
         if not path or path_index >= len(path):
             path_event = controller.step(action='GetShortestPathToPoint', target=target_pos, **step_kwargs)
-            if not path_event.metadata['lastActionSuccess']:
+            if not _last_action_success(path_event, agent_id):
                 return False
 
-            path = (path_event.metadata.get('actionReturn') or {}).get('corners') or []
+            path = (_action_return(path_event, agent_id) or {}).get('corners') or []
             if not path:
                 return False
 
@@ -405,7 +570,7 @@ def try_reach_position_iter(
         moved_dist = calculate_distance(current_pos, new_pos)
         new_final_dist = calculate_distance(new_pos, target_pos)
 
-        if move_result.metadata['lastActionSuccess'] and moved_dist > 0.02 and new_final_dist < final_dist:
+        if _last_action_success(move_result, agent_id) and moved_dist > 0.02 and new_final_dist < final_dist:
             stuck_streak = 0
             yield _progress("move:ahead")
             continue

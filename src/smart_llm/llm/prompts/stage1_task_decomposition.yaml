@@ -13,6 +13,8 @@ rules:
   - Use objectType names from catalog when possible.
   - Include concise pseudo-code in code_draft.
   - Prefer task_type from known task_types list.
+  - Do not invent primitive task_type values such as pickup, place, open, close, or toggle_object.
+  - Prefer one macro task such as heat_object or clean_object over a long chain of primitive subtasks.
 
 task_types:
   - slice_and_store

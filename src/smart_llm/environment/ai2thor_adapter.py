@@ -48,6 +48,12 @@ THOR_PROFILES = {
     },
 }
 
+DEFAULT_INTERACTION_DISTANCE = 1.0
+PORTABLE_INTERACTION_DISTANCE = 1.15
+SWITCH_INTERACTION_DISTANCE = 1.5
+FAUCET_INTERACTION_DISTANCE = 1.35
+RECEPTACLE_INTERACTION_DISTANCE = 1.35
+
 
 @dataclass
 class ThorContext:
@@ -84,6 +90,25 @@ class AI2ThorAdapter:
         self._recording_timestamp: Optional[str] = None
         self._observer_writer = None
         self._agent_writers: Dict[int, Any] = {}
+        self.max_interaction_distance = DEFAULT_INTERACTION_DISTANCE
+        self.max_receptacle_distance = RECEPTACLE_INTERACTION_DISTANCE
+
+    def _interaction_distance_for(self, object_type: str | None, *, portable: bool = False) -> float | None:
+        if object_type == "LightSwitch":
+            return SWITCH_INTERACTION_DISTANCE
+        if object_type == "Faucet":
+            return FAUCET_INTERACTION_DISTANCE
+        if object_type in {"Fridge", "Microwave", "SinkBasin", "Cabinet", "Drawer", "CounterTop"}:
+            return None
+        if portable:
+            return PORTABLE_INTERACTION_DISTANCE
+        return self.max_interaction_distance
+
+    def _coalesce(self, *values):
+        for value in values:
+            if value is not None:
+                return value
+        return None
 
     def start(self, agent_count: int) -> None:
         self.context.agent_count = agent_count
@@ -92,7 +117,10 @@ class AI2ThorAdapter:
             return
 
         if Controller is None:
-            raise RuntimeError("ai2thor is not installed")
+            raise RuntimeError(
+                "ai2thor is not installed. Run `pip install -r requirements.txt` "
+                "or `pip install ai2thor==5.0.0` in your active environment."
+            )
 
         config = dict(THOR_PROFILES[self.profile])
         self.context.controller = Controller(agentCount=agent_count, **config)
@@ -118,6 +146,19 @@ class AI2ThorAdapter:
         if self.context.agent_count > 1:
             return self.context.controller.last_event.events[agent_id].metadata
         return self.context.controller.last_event.metadata
+
+    def _event_metadata(self, event: Any, agent_id: int = 0) -> Dict[str, Any]:
+        if self.context.agent_count > 1:
+            events = getattr(event, "events", None) or []
+            if 0 <= agent_id < len(events):
+                return events[agent_id].metadata
+        return getattr(event, "metadata", {}) or {}
+
+    def _last_action_success(self, event: Any, agent_id: int = 0) -> bool:
+        return bool(self._event_metadata(event, agent_id).get("lastActionSuccess"))
+
+    def _action_return(self, event: Any, agent_id: int = 0) -> Any:
+        return self._event_metadata(event, agent_id).get("actionReturn")
 
     def _reset_mock_world(self) -> None:
         self.mock_objects = [
@@ -185,7 +226,7 @@ class AI2ThorAdapter:
             return
 
         map_view = self.context.controller.step(action="GetMapViewCameraProperties")
-        props = map_view.metadata.get("actionReturn") or {}
+        props = self._action_return(map_view) or {}
         if props:
             props = dict(props)
             if "orthographicSize" in props:
@@ -235,14 +276,17 @@ class AI2ThorAdapter:
         if not self.record_overhead_video or self.context.controller is None or self.observer_camera_id is None:
             return
 
-        event = event or self.context.controller.last_event
-        frames = getattr(event, "third_party_camera_frames", None) or []
+        event = self._coalesce(event, self.context.controller.last_event)
+        frames = self._coalesce(getattr(event, "third_party_camera_frames", None), [])
         if not frames:
-            frames = getattr(self.context.controller.last_event, "third_party_camera_frames", None) or []
+            frames = self._coalesce(getattr(self.context.controller.last_event, "third_party_camera_frames", None), [])
         if not frames and getattr(event, "events", None):
-            frames = getattr(event.events[0], "third_party_camera_frames", None) or []
+            frames = self._coalesce(getattr(event.events[0], "third_party_camera_frames", None), [])
         if not frames and getattr(self.context.controller.last_event, "events", None):
-            frames = getattr(self.context.controller.last_event.events[0], "third_party_camera_frames", None) or []
+            frames = self._coalesce(
+                getattr(self.context.controller.last_event.events[0], "third_party_camera_frames", None),
+                [],
+            )
         if self.observer_camera_id >= len(frames):
             return
 
@@ -253,12 +297,19 @@ class AI2ThorAdapter:
         if not self.record_agent_video or self.context.controller is None:
             return
 
-        event = event or self.context.controller.last_event
+        event = self._coalesce(event, self.context.controller.last_event)
         if self.context.agent_count > 1:
-            agent_events = getattr(event, "events", None) or getattr(self.context.controller.last_event, "events", None) or []
+            agent_events = self._coalesce(
+                getattr(event, "events", None),
+                getattr(self.context.controller.last_event, "events", None),
+                [],
+            )
             frames = [(idx, agent_event.frame) for idx, agent_event in enumerate(agent_events) if getattr(agent_event, "frame", None) is not None]
         else:
-            frame = getattr(event, "frame", None) or getattr(self.context.controller.last_event, "frame", None)
+            frame = self._coalesce(
+                getattr(event, "frame", None),
+                getattr(self.context.controller.last_event, "frame", None),
+            )
             frames = [(0, frame)] if frame is not None else []
 
         for agent_id, frame in frames:
@@ -295,6 +346,15 @@ class AI2ThorAdapter:
             return self.mock_objects
         return list(self._metadata(agent_id).get("objects", []))
 
+    def _inventory_rows(self, agent_id: int = 0) -> List[Dict[str, Any]]:
+        if self.dry_run:
+            return []
+        return list(self._metadata(agent_id).get("inventoryObjects", []))
+
+    def _inventory_contains(self, object_types: List[str], agent_id: int = 0) -> bool:
+        inventory_types = {obj.get("objectType") for obj in self._inventory_rows(agent_id)}
+        return any(object_type in inventory_types for object_type in object_types)
+
     def list_environment_objects(self, agent_id: int = 0) -> List[EnvironmentObject]:
         objects = []
         for obj in self._object_rows(agent_id):
@@ -313,11 +373,24 @@ class AI2ThorAdapter:
             )
         return objects
 
-    def _find_visible(self, object_type: str, agent_id: int = 0) -> Optional[Dict[str, Any]]:
+    def _find_visible(
+        self,
+        object_type: str,
+        agent_id: int = 0,
+        max_distance: float | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        matches = []
         for obj in self._object_rows(agent_id):
-            if obj.get("objectType") == object_type and obj.get("visible"):
-                return obj
-        return None
+            if obj.get("objectType") != object_type or not obj.get("visible"):
+                continue
+            if max_distance is not None:
+                distance = obj.get("distance")
+                if distance is not None and float(distance) > max_distance:
+                    continue
+            matches.append(obj)
+        if not matches:
+            return None
+        return min(matches, key=lambda row: float(row.get("distance", 999.0)))
 
     def _find_any(self, object_type: str, agent_id: int = 0) -> Optional[Dict[str, Any]]:
         for obj in self._object_rows(agent_id):
@@ -347,17 +420,19 @@ class AI2ThorAdapter:
         if task_type == "toggle_light":
             return parameters.get("action") in {"켜기", "끄기"} and self._find_any("LightSwitch", agent_id) is not None
         if task_type == "heat_object":
-            obj_type = parameters.get("object", "Bread")
+            obj_type = parameters.get("object")
             return self._find_any(obj_type, agent_id) is not None and self._find_any("Microwave", agent_id) is not None
         if task_type == "clean_object":
-            obj_type = parameters.get("object", "Plate")
+            obj_type = parameters.get("object")
             return (
-                self._find_any(obj_type, agent_id) is not None
+                obj_type is not None
+                and self._find_any(obj_type, agent_id) is not None
                 and self._find_any("SinkBasin", agent_id) is not None
                 and self._find_any("Faucet", agent_id) is not None
             )
         if task_type == "navigate":
-            return self._find_any(parameters.get("target_object", "CounterTop"), agent_id) is not None
+            target_object = parameters.get("target_object")
+            return bool(target_object) and self._find_any(target_object, agent_id) is not None
         return False
 
     def _remove_from_receptacles(self, object_id: str) -> None:
@@ -402,7 +477,8 @@ class AI2ThorAdapter:
     def _execute_mock_step(self, task_type: str, step_name: str, parameters: Dict[str, Any], agent_id: int = 0) -> bool:
         _ = agent_id
         if task_type == "navigate" and step_name == "navigate":
-            return self._find_any(parameters.get("target_object", "CounterTop")) is not None
+            target_object = parameters.get("target_object")
+            return bool(target_object) and self._find_any(target_object) is not None
 
         if task_type == "toggle_light" and step_name == "navigate_and_toggle":
             switch = self._find_any("LightSwitch")
@@ -455,30 +531,36 @@ class AI2ThorAdapter:
             return True
         event = self.context.controller.step(action="OpenObject", objectId=target["objectId"], agentId=agent_id)
         self.capture_recordings(event)
-        return bool(event.metadata.get("lastActionSuccess"))
+        return self._last_action_success(event, agent_id)
 
     def _ensure_closed(self, target: Dict[str, Any], agent_id: int) -> bool:
         if not target.get("isOpen"):
             return True
         event = self.context.controller.step(action="CloseObject", objectId=target["objectId"], agentId=agent_id)
         self.capture_recordings(event)
-        return bool(event.metadata.get("lastActionSuccess"))
+        return self._last_action_success(event, agent_id)
 
-    def _pick_visible(self, object_type: str, agent_id: int) -> bool:
-        obj = self._find_visible(object_type, agent_id)
+    def _pick_visible(self, object_type: str, agent_id: int, max_distance: float | None = None) -> bool:
+        obj = self._find_visible(object_type, agent_id, max_distance=max_distance)
         if obj is None:
             return False
         event = self.context.controller.step(action="PickupObject", objectId=obj["objectId"], agentId=agent_id)
         self.capture_recordings(event)
-        return bool(event.metadata.get("lastActionSuccess"))
+        return self._last_action_success(event, agent_id)
 
-    def _toggle_visible(self, object_type: str, thor_action: str, agent_id: int) -> bool:
-        obj = self._find_visible(object_type, agent_id)
+    def _toggle_visible(
+        self,
+        object_type: str,
+        thor_action: str,
+        agent_id: int,
+        max_distance: float | None = None,
+    ) -> bool:
+        obj = self._find_visible(object_type, agent_id, max_distance=max_distance)
         if obj is None:
             return False
         event = self.context.controller.step(action=thor_action, objectId=obj["objectId"], agentId=agent_id)
         self.capture_recordings(event)
-        return bool(event.metadata.get("lastActionSuccess"))
+        return self._last_action_success(event, agent_id)
 
     def _action_result(self, ok: bool, message: str, transitions: int = 1) -> ActionResult:
         status = "success" if ok else "failure"
@@ -507,19 +589,44 @@ class AI2ThorAdapter:
         capture_callback = self.capture_recordings
 
         if task_type == "navigate" and step_name == "navigate":
-            target = parameters.get("target_object", "CounterTop")
-            return (yield from navigate_to_object_iter(self.context.controller, agent_id, target, capture_callback))
+            target = parameters.get("target_object")
+            if not target:
+                yield self._action_result(False, f"{task_type}:{step_name}:missing_target", transitions=0)
+                return False
+            return (
+                yield from navigate_to_object_iter(
+                    self.context.controller,
+                    agent_id,
+                    target,
+                    capture_callback,
+                    max_distance=self._interaction_distance_for(target),
+                )
+            )
 
         if task_type == "toggle_light" and step_name == "navigate_and_toggle":
-            action = parameters.get("action", "끄기")
-            navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, "LightSwitch", capture_callback)
+            action = parameters.get("action")
+            if action not in {"켜기", "끄기"}:
+                yield self._action_result(False, f"{task_type}:{step_name}:missing_action", transitions=0)
+                return False
+            max_distance = self._interaction_distance_for("LightSwitch")
+            navigated = yield from navigate_to_object_iter(
+                self.context.controller,
+                agent_id,
+                "LightSwitch",
+                capture_callback,
+                max_distance=max_distance,
+            )
             if not navigated:
                 return False
             thor_action = "ToggleObjectOn" if action == "켜기" else "ToggleObjectOff"
             return (yield from self._emit_execute_action(
-                lambda: self._toggle_visible("LightSwitch", thor_action, agent_id),
-                f"{task_type}:{step_name}:toggle",
-            ))
+                lambda: self._toggle_visible(
+                        "LightSwitch",
+                        thor_action,
+                        agent_id,
+                    ),
+                    f"{task_type}:{step_name}:toggle",
+                ))
 
         if task_type == "slice_and_store":
             source_object = parameters.get("source_object")
@@ -529,10 +636,17 @@ class AI2ThorAdapter:
                 return False
 
             if step_name == "prepare_source":
+                source_distance = self._interaction_distance_for(source_object, portable=True)
                 if self._find_any(source_object + "Sliced", agent_id):
                     yield self._action_result(True, f"{task_type}:{step_name}:already_sliced", transitions=0)
                     return True
-                navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, source_object, capture_callback)
+                navigated = yield from navigate_to_object_iter(
+                    self.context.controller,
+                    agent_id,
+                    source_object,
+                    capture_callback,
+                    max_distance=source_distance,
+                )
                 if not navigated:
                     return False
                 source = self._find_visible(source_object, agent_id)
@@ -541,26 +655,45 @@ class AI2ThorAdapter:
                     return False
                 event = self.context.controller.step(action="SliceObject", objectId=source["objectId"], agentId=agent_id)
                 self.capture_recordings(event)
-                ok = bool(event.metadata.get("lastActionSuccess"))
+                ok = self._last_action_success(event, agent_id)
                 yield self._action_result(ok, f"{task_type}:{step_name}:slice")
                 return ok
 
             if step_name == "transport_and_store":
-                pickup_target = source_object + "Sliced" if self._find_any(source_object + "Sliced", agent_id) else source_object
-                navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, pickup_target, capture_callback)
-                if not navigated:
-                    return False
-                sliced = self._find_visible(source_object + "Sliced", agent_id)
-                if sliced is None:
-                    yield self._action_result(False, f"{task_type}:{step_name}:sliced_not_visible", transitions=0)
-                    return False
-                picked = yield from self._emit_execute_action(
-                    lambda: self._pick_visible(sliced["objectType"], agent_id),
-                    f"{task_type}:{step_name}:pickup",
+                carrying_source = self._inventory_contains([source_object + "Sliced", source_object], agent_id=agent_id)
+                pickup_distance = self._interaction_distance_for(source_object, portable=True)
+                target_distance = self._interaction_distance_for(target_object)
+                if not carrying_source:
+                    pickup_target = source_object + "Sliced" if self._find_any(source_object + "Sliced", agent_id) else source_object
+                    navigated = yield from navigate_to_object_iter(
+                        self.context.controller,
+                        agent_id,
+                        pickup_target,
+                        capture_callback,
+                        max_distance=pickup_distance,
+                    )
+                    if not navigated:
+                        return False
+                    sliced = self._find_visible(source_object + "Sliced", agent_id)
+                    if sliced is None:
+                        yield self._action_result(False, f"{task_type}:{step_name}:sliced_not_visible", transitions=0)
+                        return False
+                    picked = yield from self._emit_execute_action(
+                        lambda: self._pick_visible(
+                            sliced["objectType"],
+                            agent_id,
+                        ),
+                        f"{task_type}:{step_name}:pickup",
+                    )
+                    if not picked:
+                        return False
+                navigated = yield from navigate_to_object_iter(
+                    self.context.controller,
+                    agent_id,
+                    target_object,
+                    capture_callback,
+                    max_distance=target_distance,
                 )
-                if not picked:
-                    return False
-                navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, target_object, capture_callback)
                 if not navigated:
                     return False
                 target = self._find_visible(target_object, agent_id)
@@ -580,23 +713,43 @@ class AI2ThorAdapter:
                     agentId=agent_id,
                 )
                 self.capture_recordings(put_event)
-                ok = bool(put_event.metadata.get("lastActionSuccess"))
+                ok = self._last_action_success(put_event, agent_id)
                 yield self._action_result(ok, f"{task_type}:{step_name}:put")
                 return ok
 
         if task_type == "heat_object":
-            obj_type = parameters.get("object", "Bread")
+            obj_type = parameters.get("object")
+            portable_distance = self._interaction_distance_for(obj_type, portable=True)
+            microwave_distance = self._interaction_distance_for("Microwave")
             if step_name == "load_microwave":
-                navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, obj_type, capture_callback)
+                if not obj_type:
+                    yield self._action_result(False, f"{task_type}:{step_name}:missing_object", transitions=0)
+                    return False
+                navigated = yield from navigate_to_object_iter(
+                    self.context.controller,
+                    agent_id,
+                    obj_type,
+                    capture_callback,
+                    max_distance=portable_distance,
+                )
                 if not navigated:
                     return False
                 picked = yield from self._emit_execute_action(
-                    lambda: self._pick_visible(obj_type, agent_id),
+                    lambda: self._pick_visible(
+                        obj_type,
+                        agent_id,
+                    ),
                     f"{task_type}:{step_name}:pickup",
                 )
                 if not picked:
                     return False
-                navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, "Microwave", capture_callback)
+                navigated = yield from navigate_to_object_iter(
+                    self.context.controller,
+                    agent_id,
+                    "Microwave",
+                    capture_callback,
+                    max_distance=microwave_distance,
+                )
                 if not navigated:
                     return False
                 microwave = self._find_visible("Microwave", agent_id)
@@ -616,7 +769,7 @@ class AI2ThorAdapter:
                     agentId=agent_id,
                 )
                 self.capture_recordings(put_event)
-                put_ok = bool(put_event.metadata.get("lastActionSuccess"))
+                put_ok = self._last_action_success(put_event, agent_id)
                 yield self._action_result(put_ok, f"{task_type}:{step_name}:put")
                 if not put_ok:
                     return False
@@ -629,7 +782,13 @@ class AI2ThorAdapter:
                     f"{task_type}:{step_name}:close",
                 ))
             if step_name == "activate_microwave":
-                navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, "Microwave", capture_callback)
+                navigated = yield from navigate_to_object_iter(
+                    self.context.controller,
+                    agent_id,
+                    "Microwave",
+                    capture_callback,
+                    max_distance=microwave_distance,
+                )
                 if not navigated:
                     return False
                 microwave = self._find_visible("Microwave", agent_id)
@@ -643,23 +802,48 @@ class AI2ThorAdapter:
                 if not closed:
                     return False
                 return (yield from self._emit_execute_action(
-                    lambda: self._toggle_visible("Microwave", "ToggleObjectOn", agent_id),
+                    lambda: self._toggle_visible(
+                        "Microwave",
+                        "ToggleObjectOn",
+                        agent_id,
+                    ),
                     f"{task_type}:{step_name}:toggle",
                 ))
 
         if task_type == "clean_object":
-            obj_type = parameters.get("object", "Plate")
+            obj_type = parameters.get("object")
+            portable_distance = self._interaction_distance_for(obj_type, portable=True)
+            sink_distance = self._interaction_distance_for("SinkBasin")
+            faucet_distance = self._interaction_distance_for("Faucet")
             if step_name == "place_in_sink":
-                navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, obj_type, capture_callback)
+                if not obj_type:
+                    yield self._action_result(False, f"{task_type}:{step_name}:missing_object", transitions=0)
+                    return False
+                navigated = yield from navigate_to_object_iter(
+                    self.context.controller,
+                    agent_id,
+                    obj_type,
+                    capture_callback,
+                    max_distance=portable_distance,
+                )
                 if not navigated:
                     return False
                 picked = yield from self._emit_execute_action(
-                    lambda: self._pick_visible(obj_type, agent_id),
+                    lambda: self._pick_visible(
+                        obj_type,
+                        agent_id,
+                    ),
                     f"{task_type}:{step_name}:pickup",
                 )
                 if not picked:
                     return False
-                navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, "SinkBasin", capture_callback)
+                navigated = yield from navigate_to_object_iter(
+                    self.context.controller,
+                    agent_id,
+                    "SinkBasin",
+                    capture_callback,
+                    max_distance=sink_distance,
+                )
                 if not navigated:
                     return False
                 sink = self._find_visible("SinkBasin", agent_id)
@@ -673,15 +857,25 @@ class AI2ThorAdapter:
                     agentId=agent_id,
                 )
                 self.capture_recordings(put_event)
-                ok = bool(put_event.metadata.get("lastActionSuccess"))
+                ok = self._last_action_success(put_event, agent_id)
                 yield self._action_result(ok, f"{task_type}:{step_name}:put")
                 return ok
             if step_name == "toggle_faucet":
-                navigated = yield from navigate_to_object_iter(self.context.controller, agent_id, "Faucet", capture_callback)
+                navigated = yield from navigate_to_object_iter(
+                    self.context.controller,
+                    agent_id,
+                    "Faucet",
+                    capture_callback,
+                    max_distance=faucet_distance,
+                )
                 if not navigated:
                     return False
                 return (yield from self._emit_execute_action(
-                    lambda: self._toggle_visible("Faucet", "ToggleObjectOn", agent_id),
+                    lambda: self._toggle_visible(
+                        "Faucet",
+                        "ToggleObjectOn",
+                        agent_id,
+                    ),
                     f"{task_type}:{step_name}:toggle",
                 ))
 

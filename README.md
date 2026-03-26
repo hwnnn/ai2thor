@@ -1,341 +1,126 @@
-# AI2THOR Multi-Agent Navigation System
+# AI2THOR SMART-LLM Aligned Multi-Agent System
 
-AI2THOR 환경에서 동작하는 **LLM 기반 멀티-에이전트 내비게이션 시스템**입니다.
+SMART-LLM 논문의 4단계(Stage 1~4) 파이프라인을 기준으로 AI2-THOR 멀티에이전트 실행을 구현한 프로젝트입니다.
 
-## 🎯 주요 기능
+## 핵심 구성
+- Stage 1: Task Decomposition
+- Stage 2: Coalition Formation
+- Stage 3: Task Allocation
+- Stage 4: Task Execution (Primitive-action Interleaving + Retry/Local Replan)
 
-### 1. LLM 기반 자연어 명령 처리
-- **Ollama + llama3.2:3b 모델** 사용
-- 한국어 자연어 명령을 작업으로 분해
-- 작업 간 의존성 분석 및 최적 에이전트 수 결정
+## 디렉토리 구조
+```text
+ai2thor/
+├── main.py
+├── docker-compose.yml
+├── src/smart_llm/
+│   ├── config.py
+│   ├── pipeline.py
+│   ├── llm/
+│   │   └── prompts/stage1_task_decomposition.yaml
+│   ├── schemas/
+│   ├── stages/
+│   ├── execution/
+│   ├── environment/
+│   ├── metrics/
+│   ├── knowledge/
+│   │   └── ai2thor_world.yaml
+│   └── benchmark/
+├── tests/
+└── docs/
+```
 
-### 2. AI2-THOR 네이티브 경로 찾기
-- **GetShortestPathToPoint API**: AI2-THOR의 자동 경로 계산 사용
-- **웨이포인트 기반 이동**: 장애물 자동 우회
-- **GetReachablePositions + GetInteractablePoses**: 도달 가능하면서 상호작용 가능한 위치 선택
-- 충돌 감지 시 자동 회전 및 재시도
+## 빠른 시작
+### 1) 가상환경 생성 및 활성화
+프로젝트별로 의존성을 분리하려면 먼저 가상환경을 만드는 편이 좋습니다. 아래 예시는 macOS/Linux 기준입니다.
 
-### 3. 멀티-에이전트 병렬 실행
-- 독립적인 작업 병렬 처리
-- 에이전트별 비디오 POV 녹화 (15fps, avc1 codec)
-- 에이전트 초기 위치 최적 분산 (3m+ 간격, 객체에서 4m+)
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
 
-### 4. 지원 작업 타입
-- `slice_and_store`: 객체 자르기 + 저장
-- `toggle_light`: 전등 제어
-- `heat_object`: 전자레인지 사용
-- `clean_object`: 싱크대 사용
-
-## 📋 필수 요구사항
-
-- **Python**: 3.8+
-- **Ollama**: 로컬 LLM 서버
-- **AI2THOR**: 5.0.0
-- **OpenCV**: 비디오 녹화용
-
-## 🚀 설치 및 실행
-
-## 🚀 설치 및 실행
-
-### 1. 의존성 설치
-
+### 2) 의존성 설치
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Ollama 설치 및 모델 다운로드
+### 3) `.env` 파일 생성
+```bash
+OPENAI_API_KEY=your_api_key_here
+OPENAI_MODEL=gpt-4.1-mini
+# Optional
+# OPENAI_BASE_URL=https://api.openai.com/v1
+# OPENAI_REASONING_EFFORT=low
+```
+
+### 4) Dry-run 실행 (AI2-THOR 없이)
+```bash
+python main.py "토마토를 썰어서 냉장고에 넣고, 불을 꺼줘" --provider echo --model echo --dry-run
+```
+
+### 5) GPT 기반 실행
+```bash
+python main.py "토마토를 썰어서 냉장고에 넣고, 불을 꺼줘" --provider openai --profile dev
+```
+
+### 6) 상단 관찰 카메라 저장
+AI2-THOR의 공식 `GetMapViewCameraProperties -> AddThirdPartyCamera` 흐름을 사용해 orthographic top view 영상을 저장합니다. 즉 현재 구현은 근사치가 아니라, 원근이 제거된 공식 map-view top camera를 사용합니다.
 
 ```bash
-# macOS
-brew install ollama
-
-# Ollama 서버 시작
-ollama serve
-
-# 새 터미널에서 모델 다운로드
-ollama pull llama3.2:3b
+python main.py "토마토를 썰어서 냉장고에 넣고, 불을 꺼줘" --provider openai --profile dev --record-overhead --record-dir output_videos
 ```
 
-### 3. 실행
+### 7) 각 agent POV + top view 동시 저장
+top view와 함께 각 agent 시야 영상도 mp4로 저장합니다.
 
 ```bash
-# 기본 명령 실행
-python3 multi_agent_llm_prompting.py
-
-# 커스텀 명령 실행
-python3 multi_agent_llm_prompting.py "토마토를 썰어서 냉장고에 넣고, 불을 꺼줘"
+python main.py "토마토를 썰어서 냉장고에 넣고, 불을 꺼줘" --provider openai --profile dev --record-overhead --record-pov --record-dir output_videos
 ```
 
-## 📁 주요 파일 구조
-
-```
-ai2thor/
-├── multi_agent_llm_prompting.py  # 메인 실행 파일 (LLM 통합)
-├── navigation_utils.py            # AI2-THOR 경로 찾기 및 내비게이션
-├── single_agent.py                # 단일 에이전트 테스트용
-├── output_videos/                 # 녹화된 비디오 저장
-└── requirements.txt               # 의존성 목록
-```
-
-## 🎮 사용 예시
-
-### 예시 1: 단일 작업
+### 8) 빠른 smoke test
+실제 AI2-THOR 렌더러와 멀티에이전트 스케줄링만 빠르게 확인하려면 echo provider와 `test` 프로필을 쓰면 됩니다.
 
 ```bash
-python3 multi_agent_llm_prompting.py "토마토를 썰어서 냉장고에 넣어줘"
+python main.py "토마토를 썰어서 냉장고에 넣고, 불을 꺼줘" --provider echo --profile test --record-overhead --record-pov
 ```
 
-**실행 결과:**
-- LLM 분석: 1개 작업 → 1명 에이전트
-- Agent 0: 토마토 찾기 → 이동 → 자르기 → 픽업 → 냉장고로 이동 → 넣기
-- 출력: `output_videos/agent0_YYYYMMDD_HHMMSS.mp4`
+## 실행 방식
+- agent 수는 고정 3대가 아니라, Stage 1에서 나온 병렬 폭을 기준으로 이번 run에 필요한 수만 생성합니다. 예를 들어 `토마토를 썰어서 냉장고에 넣고, 불을 꺼줘`는 2 agent로 실행됩니다.
+- 병렬 subtasks는 같은 `thread_group` 안에서 primitive action 단위로 interleave 됩니다. 즉 한 agent가 `MoveAhead` 또는 `Rotate` 1회 수행하면 다음 agent 차례로 넘어갑니다.
+- 실제 AI2-THOR 다중 agent 제어는 `agentId`별 액션 호출 방식이라, 완전히 동일 tick의 동시 물리 실행보다는 라운드로빈에 가까운 병렬 실행입니다.
+- 이동 실패 시에는 좌우 이동만 반복하지 않도록 회전, 후진, 재정렬, 다른 interactable pose 재시도를 사용합니다.
+- 실패한 task를 `CounterTop` 같은 임의 목표로 바꿔 계속 진행하지 않습니다. 실패는 그대로 실패로 보고됩니다.
+- 녹화 artifact에는 `overhead_video`, `agent_videos`, `agent_count`가 포함됩니다.
 
-### 예시 2: 병렬 작업
+## 벤치마크 실행
+벤치마크 실행은 단일 명령 1개를 돌리는 것이 아니라, `src/smart_llm/benchmark/tasks.json`에 들어 있는 표준 과제 묶음을 순회하면서 카테고리별 평균 지표를 계산하는 모드입니다. 현재 구현은 각 카테고리에서 unseen split을 뽑아 `Exe`, `RU`, `GCR`, `TCR`, `SR`를 집계합니다.
 
 ```bash
-python3 multi_agent_llm_prompting.py "토마토를 썰어서 냉장고에 넣고, 불을 꺼줘"
+python main.py --benchmark --benchmark-path src/smart_llm/benchmark/tasks.json --provider openai --json
 ```
 
-**실행 결과:**
-- LLM 분석: 2개 독립 작업 → 2명 에이전트
-- Agent 0: 토마토 → 냉장고 (0.28~0.29m 거리에서 상호작용)
-- Agent 1: 전등 스위치 → 끄기 (0.28m 거리에서 상호작용)
-- 출력: `agent0_*.mp4`, `agent1_*.mp4`
-- 실행 시간: 약 2초 (32 프레임, 15fps)
-
-## 🔧 핵심 기술
-
-### 1. AI2-THOR 네이티브 경로 찾기
-
-```
-1. GetReachablePositions: 에이전트가 걸을 수 있는 모든 위치
-2. GetInteractablePoses: 객체와 상호작용 가능한 위치
-3. 교집합 계산: 실제 도달 가능한 상호작용 위치 선택
-4. GetShortestPathToPoint: AI2-THOR가 최단 경로 계산 (자동 장애물 우회)
-5. 웨이포인트 추적: 계산된 경로의 각 웨이포인트로 순차 이동
-6. 목표 도달: 약 0.35m 이내 도달 시 완료
-7. 객체 방향 회전 및 상하 시야 탐색 (정면 → 아래 30° → 위 60°)
-```
-
-### 2. 웨이포인트 이동 전략
-
-```
-- 각 웨이포인트마다:
-  1. 목표 방향 계산
-  2. 15도 이상 차이나면 회전
-  3. 0.25m씩 전진
-  4. 이동 실패 시:
-     - 15도 좌우 회전 후 재시도
-     - 10회 이상 실패 시 다음 웨이포인트로
-  5. 0.35m 이내 도달 시 다음 웨이포인트로
-```
-
-### 3. 객체 상호작용 거리
-
-```
-- 도달 가능 위치 중 에이전트에서 가장 가까운 위치 선택
-- 최종 도착: 약 0.28~0.35m (28~35cm)
-- 상호작용 성공률: 매우 높음
-- 충돌 시 자동 우회 및 재시도
-```
-
-### 3. LLM 프롬프트 구조
-
-```
-- 사용자 명령 입력
-- 작업 타입 정의 (slice_and_store, toggle_light 등)
-- 작업 분해 및 의존성 분석
-- 최적 에이전트 수 결정
-- JSON 형식으로 작업 목록 반환
-```
-
-## 🎯 설정 가능 파라미터
-
-### navigation_utils.py
-
-```python
-# 웨이포인트/목표 도착 거리
-if dist < 0.35:  # 0.35m 이내면 도착
-
-# 회전 각도 임계값
-if abs(angle_diff) > 15:  # 15도 이상 차이나면 회전
-
-# 웨이포인트 재시도
-max_attempts = 30  # 각 웨이포인트당 최대 30번
-if attempts > 10:  # 10회 이상 실패 시 다음 웨이포인트로
-```
-
-### multi_agent_llm_prompting.py
-
-```python
-# 비디오 설정
-targetFrameRate = 15  # FPS 15로 설정 (속도 조절)
-
-# 에이전트 초기 위치
-min_distance_agents = 3.0    # 에이전트 간 최소 거리
-min_distance_objects = 4.0   # 객체와 최소 거리 (실제 이동 보장)
-
-# LLM 설정
-model = "llama3.2:3b"
-timeout = 60  # 초
-```
-
-## 📊 출력 결과
-
-### 터미널 출력
-
-```
-🤔 LLM 분석 중...
-✓ 분석 완료
-  - 작업 수: 2개
-  - 필요 에이전트: 2명
-  - 분석: Two independent tasks...
-
-🎮 Controller 초기화 중...
-✓ 초기화 완료
-
-📦 씬 내 객체 수: 87개
-📍 Agent0: (1.25, -0.75)
-📍 Agent1: (-2.00, 1.50)
-
-💡 작업 실행 시작
-
-[Agent0] 🎯 작업: Tomato → Fridge
-  🎯 목표 객체: Tomato|-00.39|+01.14|-00.81
-  📍 시도 1/3: (-0.25, -1.50)
-    🚶 이동 시작: 1.03m
-    🗺️ 경로: 2개 웨이포인트
-    ✓ 도착 (거리 0.29m)
-  🔄 객체 방향 회전 (-95°)
-  👀 수직 탐색
-  ✓ 발견 (정면)
-  [2/4] Tomato 자르기
-  ✓ 자르기 성공
-  📦 TomatoSliced 픽업
-  [3/4] Fridge로 이동
-  ...
-  ✓ 도착 (거리 0.28m)
-  [4/4] Fridge에 넣기
-  ✅ 작업 완료!
-
-✓ 녹화 완료 (총 32 프레임)
-📁 Agent0: agent0_20251220_221647.mp4
-📁 Agent1: agent1_20251220_221647.mp4
-```
-
-### 비디오 출력
-
-- **파일명**: `agent{id}_{timestamp}.mp4`
-- **해상도**: 800x600
-- **프레임레이트**: 15fps (속도 조절 가능)
-- **코덱**: avc1 (H.264)
-- **오버레이**: Agent 번호, 프레임 번호
-
-## 🐛 문제 해결
-
-## 🐛 문제 해결
-
-### Ollama 연결 오류
+## 테스트
+테스트는 벤치마크와 다르게 "성능 평가"가 아니라 "코드가 안 깨졌는지 확인하는 회귀 검사"입니다. `tests/` 아래의 단위/통합 테스트를 실행해서 스키마 검증, 할당 로직, 실행기 동작, 메트릭 계산, dry-run 파이프라인이 기대대로 유지되는지 확인합니다.
 
 ```bash
-❌ Ollama 연결 오류: [Errno 61] Connection refused
+python -m unittest discover -s tests -v
 ```
 
-**해결:**
-```bash
-ollama serve  # 새 터미널에서 실행
-```
-
-### 모델을 찾을 수 없음
+## 카탈로그 갱신(선택)
+카탈로그 갱신은 설치된 AI2-THOR 런타임을 스캔해서 `src/smart_llm/knowledge/ai2thor_world.yaml`의 scene/object 지식을 새로 반영하는 작업입니다. 보통 AI2-THOR 버전을 올렸거나, 프롬프트/휴리스틱이 참고하는 객체 목록을 최신화하고 싶을 때만 필요합니다. 매 실행마다 돌리는 명령은 아닙니다.
 
 ```bash
-❌ Ollama 요청 실패: 404
+python scripts/update_ai2thor_catalog.py
 ```
 
-**해결:**
-```bash
-ollama pull llama3.2:3b
-```
+## 문서
+- 아키텍처: `docs/architecture.md`
+- 실험 가이드/지표: `docs/experiments.md`
+- AI2-THOR 요약: `AI2THOR_API_REFERENCE_SUMMARY.md`
 
-### OpenCV 오류
+## 지표
+- `Exe`, `RU`, `GCR`, `TCR`, `SR`
 
-```bash
-ModuleNotFoundError: No module named 'cv2'
-```
-
-**해결:**
-```bash
-pip install opencv-python
-```
-
-### 에이전트가 객체를 찾지 못함
-
-- **원인**: GetInteractablePoses가 빈 배열 반환
-- **해결**: 씬에 해당 객체가 존재하는지 확인
-
-### 에이전트가 목표에 도달하지 못함
-
-- **원인**: GetShortestPathToPoint가 경로를 찾지 못함
-- **해결**: 
-  - 목표 위치가 도달 가능한지 확인
-  - 에이전트 초기 위치를 변경해보기
-  - 다른 상호작용 가능 위치 시도 (자동으로 3개까지 시도)
-
-## 🔍 기술 세부사항
-
-### 사용된 AI2-THOR API
-
-```python
-# 위치 정보
-GetReachablePositions()           # 걸어갈 수 있는 모든 위치
-GetInteractablePoses(objectId)    # 객체와 상호작용 가능한 위치
-GetShortestPathToPoint(target)    # 목표까지 최단 경로 계산 (웨이포인트 반환)
-
-# 이동
-MoveAhead(moveMagnitude)          # 전진
-RotateRight(degrees)              # 우회전
-RotateLeft(degrees)               # 좌회전
-
-# 시야
-LookUp(degrees)                   # 고개 위로
-LookDown(degrees)                 # 고개 아래로
-
-# 상호작용
-SliceObject(objectId)             # 자르기
-PickupObject(objectId)            # 픽업
-OpenObject(objectId)              # 열기
-CloseObject(objectId)             # 닫기
-PutObject(objectId)               # 넣기
-ToggleObjectOn(objectId)          # 켜기
-ToggleObjectOff(objectId)         # 끄기
-```
-
-### 좌표 시스템
-
-- **X축**: 좌우 (양수: 오른쪽)
-- **Y축**: 상하 (고정: 0.91)
-- **Z축**: 앞뒤 (양수: 앞)
-- **단위**: 미터(m)
-- **그리드**: 0.25m
-
-## 📚 참고 자료
-
-- [AI2-THOR 공식 문서](https://ai2thor.allenai.org/ithor/documentation/)
-- [Ollama 공식 사이트](https://ollama.ai/)
-- [llama3.2 모델 정보](https://ollama.ai/library/llama3.2)
-
-## 🤝 기여
-
-이슈 및 PR은 언제나 환영합니다!
-
-## 📄 라이선스
-
-MIT License
-
----
-
-**개발 환경:**
-- Python: 3.13.2
-- AI2-THOR: 5.0.0
-- Ollama: llama3.2:3b
-- 위치: `/Users/jaehwan/Desktop/JaeHwan/workspace/ai2thor`
+## LLM 출력 메타데이터
+- Stage 1 결과에는 `provider`, `model`, `latency_ms`, `prompt_tokens`, `completion_tokens`가 함께 기록됩니다.

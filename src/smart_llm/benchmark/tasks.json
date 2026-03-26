@@ -1,0 +1,49 @@
+{
+  "tasks": [
+    {
+      "task_id": "B1",
+      "category": "Elemental",
+      "command": "불을 꺼줘",
+      "scene": "FloorPlan1",
+      "robots": ["agent0"],
+      "constraints": ["must_use_light_switch"],
+      "goal_states": [
+        {"objectType": "LightSwitch", "state": {"isToggled": false}}
+      ]
+    },
+    {
+      "task_id": "B2",
+      "category": "Simple",
+      "command": "토마토를 썰어줘",
+      "scene": "FloorPlan1",
+      "robots": ["agent0"],
+      "constraints": ["must_slice"],
+      "goal_states": [
+        {"objectType": "TomatoSliced", "state": {"exists": true}}
+      ]
+    },
+    {
+      "task_id": "B3",
+      "category": "Compound",
+      "command": "토마토를 썰어서 냉장고에 넣어줘",
+      "scene": "FloorPlan1",
+      "robots": ["agent0"],
+      "constraints": ["must_store_in_fridge"],
+      "goal_states": [
+        {"objectType": "Fridge", "state": {"contains": "TomatoSliced"}}
+      ]
+    },
+    {
+      "task_id": "B4",
+      "category": "Complex",
+      "command": "토마토를 썰어서 냉장고에 넣고, 불을 꺼줘",
+      "scene": "FloorPlan1",
+      "robots": ["agent0", "agent1"],
+      "constraints": ["parallel_execution_preferred"],
+      "goal_states": [
+        {"objectType": "Fridge", "state": {"contains": "TomatoSliced"}},
+        {"objectType": "LightSwitch", "state": {"isToggled": false}}
+      ]
+    }
+  ]
+}
